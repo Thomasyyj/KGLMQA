@@ -55,7 +55,7 @@ def load_data(args, devices, kg):
         model_name=args.encoder,
         max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
         is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-        subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg)
+        subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg, augmentation_times=args.augmentation_times)
 
     return dataset
 
@@ -132,9 +132,10 @@ def count_parameters(loaded_params, not_loaded_params):
 
 def calc_loss_and_acc(logits, labels, loss_type, loss_func):
     bs = labels.size(0)
+    num_choice = labels.size(1)
 
     if loss_type == 'margin_rank':
-        num_choice = logits.size(1)
+        bs = logits.size(0)
         flat_logits = logits.view(-1)
         correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
         correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
@@ -142,12 +143,52 @@ def calc_loss_and_acc(logits, labels, loss_type, loss_func):
         y = wrong_logits.new_ones((wrong_logits.size(0),))
         loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
     elif loss_type == 'cross_entropy':
+        logits = logits.reshape(bs, num_choice)
+        labels = labels.reshape(bs, num_choice)[:,0]
         loss = loss_func(logits, labels)
     loss *= bs
 
     n_corrects = (logits.argmax(1) == labels).sum().item()
 
     return loss, n_corrects
+
+
+def calc_eval_accuracy1(eval_set, model, loss_type, loss_func, debug, save_test_preds, preds_path):
+    """Eval on the dev or test set - calculate loss and accuracy"""
+    total_loss_acm = 0.0
+    n_samples_acm = n_corrects_acm = 0
+    model.eval()
+    if save_test_preds:
+        utils.check_path(preds_path)
+        f_preds = open(preds_path, 'w')
+    with torch.no_grad():
+        for qids, labels, *input_data in eval_set:
+            bs = labels.size(0)
+            ####
+            # mask the question
+            # bs, nc, eml = input_data[0].shape
+            # question_len = [(input_data[0] == 2).nonzero()[[15*i]][:, 2] for i in range(bs)] #bs
+            # for i_bs, idx in enumerate(question_len):
+            #     input_data[0][i_bs, :, 1:idx] = torch.randint(1, 10000, (nc, idx-1))
+            ####
+            logits, _ = model(*input_data)
+            logits = logits[:,:5]
+            labels = labels[:,:5]
+            loss, n_corrects = calc_loss_and_acc(logits, labels, loss_type, loss_func)
+
+            total_loss_acm += loss.item()
+            n_corrects_acm += n_corrects
+            n_samples_acm += bs
+            if save_test_preds:
+                predictions = logits.argmax(1) #[bsize, ]
+                for qid, pred in zip(qids, predictions):
+                    print ('{},{}'.format(qid, chr(ord('A') + pred.item())), file=f_preds)
+                    f_preds.flush()
+            if debug:
+                break
+    if save_test_preds:
+        f_preds.close()
+    return total_loss_acm / n_samples_acm, n_corrects_acm / n_samples_acm
 
 
 def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_preds, preds_path):
@@ -159,8 +200,15 @@ def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_p
         utils.check_path(preds_path)
         f_preds = open(preds_path, 'w')
     with torch.no_grad():
-        for qids, labels, *input_data in tqdm(eval_set, desc="Dev/Test batch"):
+        for qids, labels, *input_data in eval_set:
             bs = labels.size(0)
+            ####
+            # mask the question
+            # bs, nc, eml = input_data[0].shape
+            # question_len = [(input_data[0] == 2).nonzero()[[15*i]][:, 2] for i in range(bs)] #bs
+            # for i_bs, idx in enumerate(question_len):
+            #     input_data[0][i_bs, :, 1:idx] = torch.randint(1, 10000, (nc, idx-1))
+            ####
             logits, _ = model(*input_data)
 
             loss, n_corrects = calc_loss_and_acc(logits, labels, loss_type, loss_func)
@@ -180,9 +228,11 @@ def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_p
     return total_loss_acm / n_samples_acm, n_corrects_acm / n_samples_acm
 
 
-def train(args, resume, has_test_split, devices, kg):
-    print("args: {}".format(args))
 
+
+
+def train(args, resume, has_test_split, devices, kg):
+    accum_steps=32
     if resume:
         args.save_dir = os.path.dirname(args.resume_checkpoint)
     if not args.debug:
@@ -211,6 +261,9 @@ def train(args, resume, has_test_split, devices, kg):
         test_dataloader = dataset.test()
 
     model = construct_model(args, kg)
+    answer_tokens = ['<ANS{}>'.format(i) for i in range(5)] 
+    #answer_tokens = ['<ANS>'] 
+    num_added = dataset.tokenizer.add_tokens(answer_tokens, special_tokens=True)
     model.lmgnn.mp.resize_token_embeddings(len(dataset.tokenizer))
 
     # Get the names of the loaded LM parameters
@@ -319,36 +372,40 @@ def train(args, resume, has_test_split, devices, kg):
         args.unfreeze_epoch = 0
     if last_epoch + 1 <= args.unfreeze_epoch:
         utils.freeze_params(params_to_freeze)
+        uf = False
     for epoch_id in trange(last_epoch + 1, args.n_epochs, desc="Epoch"):
         if epoch_id == args.unfreeze_epoch:
             utils.unfreeze_params(params_to_freeze)
+            uf = True
         if epoch_id == args.refreeze_epoch:
             utils.freeze_params(params_to_freeze)
         model.train()
 
-        for qids, labels, *input_data in tqdm(train_dataloader, desc="Batch"):
+        for batch_num, (qids, labels, *input_data) in enumerate(train_dataloader):
             # labels: [bs]
             start_time = time.time()
-            optimizer.zero_grad()
             bs = labels.size(0)
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
-                logits, _ = model(*[x[a:b] for x in input_data])
+                logits, _ = model(*[x[a:b] for x in input_data], unfreeze=uf)
                 # logits: [bs, nc]
 
                 loss, n_corrects = calc_loss_and_acc(logits, labels[a:b], args.loss, loss_func)
 
                 total_loss_acm += loss.item()
                 loss = loss / bs
+                loss = loss / accum_steps
                 loss.backward()
                 n_corrects_acm += n_corrects
                 n_samples_acm += (b - a)
-
-            if args.max_grad_norm > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            
             scheduler.step()
             # Gradients are accumulated and not back-proped until a batch is processed (not a mini-batch).
-            optimizer.step()
+            if ((batch_num+1)%accum_steps) == 0 or (batch_num + 1 == len(train_dataloader)):
+                if args.max_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+                optimizer.zero_grad()
 
             total_time += (time.time() - start_time)
 
@@ -373,14 +430,16 @@ def train(args, resume, has_test_split, devices, kg):
         model.eval()
         preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
         dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+
         if has_test_split:
             preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
-            test_total_loss, test_acc = calc_eval_accuracy(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+            test_total_loss, test_acc = calc_eval_accuracy1(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
         else:
             test_acc = 0
 
         print('-' * 71)
         print('| epoch {:3} | step {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, global_step, dev_acc, test_acc))
+        # print('| shuffled: | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc_shuffle, test_acc_shuffle))
         print('-' * 71)
 
         if not args.debug:
@@ -392,6 +451,7 @@ def train(args, resume, has_test_split, devices, kg):
             tb_writer.flush()
 
         if dev_acc >= best_dev_acc:
+            save_ = 1
             best_dev_acc = dev_acc
             final_test_acc = test_acc
             best_dev_epoch = epoch_id
@@ -404,7 +464,8 @@ def train(args, resume, has_test_split, devices, kg):
             wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
 
         # Save the model checkpoint
-        if args.save_model:
+        if args.save_model and epoch_id>=2 and save_:
+            save_ = 0
             model_state_dict = model.state_dict()
             del model_state_dict["lmgnn.concept_emb.emb.weight"]
             checkpoint = {"model": model_state_dict, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "epoch": epoch_id, "global_step": global_step, "best_dev_epoch": best_dev_epoch, "best_dev_acc": best_dev_acc, "final_test_acc": final_test_acc, "config": args}
@@ -448,9 +509,14 @@ def evaluate(args, has_test_split, devices, kg):
 
     dataset = load_data(args, devices, kg)
     dev_dataloader = dataset.dev()
+    train_dataloader = dataset.train()
     if has_test_split:
         test_dataloader = dataset.test()
     model = construct_model(args, kg)
+    ##edit##
+    answer_tokens = ['<ANS{}>'.format(i) for i in range(5)] 
+    #answer_tokens = ['<ANS>'] 
+    num_added = dataset.tokenizer.add_tokens(answer_tokens, special_tokens=True)
     model.lmgnn.mp.resize_token_embeddings(len(dataset.tokenizer))
 
     model.load_state_dict(checkpoint["model"], strict=False)
@@ -478,17 +544,19 @@ def evaluate(args, has_test_split, devices, kg):
 
     model.eval()
     # Evaluation on the dev set
+    preds_path = os.path.join(args.save_dir, 'train_e{}_preds.csv'.format(epoch_id))
+    train_total_loss, train_acc = calc_eval_accuracy(train_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
     preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
-    dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
+    dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, debug, not debug, preds_path, 1)
     if has_test_split:
         # Evaluation on the test set
         preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
-        test_total_loss, test_acc = calc_eval_accuracy(test_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
+        test_total_loss, test_acc = calc_eval_accuracy1(test_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
     else:
         test_acc = 0
 
     print('-' * 71)
-    print('dev_acc {:7.4f}, test_acc {:7.4f}'.format(dev_acc, test_acc))
+    print('train_acc {:7.4f}, dev_acc {:7.4f}, test_acc {:7.4f}'.format(train_acc, dev_acc, test_acc))
     print('-' * 71)
 
 
@@ -601,6 +669,7 @@ if __name__ == '__main__':
     parser.add_argument('--unfreeze_epoch', default=4, type=int, help="Number of the first few epochs in which LM’s parameters are kept frozen.")
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--init_range', default=0.02, type=float, help='stddev when initializing with normal distribution')
+    parser.add_argument('--augmentation_times', default=4, type=int, help='how many times do we want to augment the data')
 
     args = parser.parse_args()
     main(args)

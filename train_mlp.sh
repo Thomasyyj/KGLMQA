@@ -1,20 +1,58 @@
-#!/bin/bash
+#!/bin/sh
+#SBATCH -N 1      # nodes requested
+#SBATCH -n 1      # tasks requested
+#SBATCH --partition=Teach-LongJobs
+#SBATCH --gres=gpu:5
+#SBATCH --mem=20000  # memory in Mb
+#SBATCH --time=0-08:00:00
+
+export CUDA_HOME=/opt/cuda-10.1/
+
+export CUDNN_HOME=/opt/cuDNN-7.0/
+
+export STUDENT_ID=$(whoami)
+
+export LD_LIBRARY_PATH=${CUDNN_HOME}/lib64:${CUDA_HOME}/lib64:$LD_LIBRARY_PATH
+
+export LIBRARY_PATH=${CUDNN_HOME}/lib64:$LIBRARY_PATH
+
+export CPATH=${CUDNN_HOME}/include:$CPATH
+
+export PATH=${CUDA_HOME}/bin:${PATH}
+
+export PYTHON_PATH=$PATH
+
+mkdir -p /disk/scratch/${STUDENT_ID}
+
+
+export TMPDIR=/disk/scratch/${STUDENT_ID}/
+export TMP=/disk/scratch/${STUDENT_ID}/
+
+
+mkdir -p ${TMP}/datasets/
+export DATASET_DIR=${TMP}/datasets/
+# Activate the relevant virtual environment:
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4
+
 export TOKENIZERS_PARALLELISM=true
+
+
+
 dt=`date '+%Y%m%d_%H%M%S'`
 
 
-dataset=$1
-shift
+dataset=csqa
+
 encoder='roberta-large'
 args=$@
 
 
-elr="5e-6"
+elr="1e-5"
 dlr="1e-3"
-bs=4
-mbs=4
-unfreeze_epoch=1
-# unfreeze_epoch=0
+bs=32
+mbs=8
+unfreeze_epoch=4
 k=5 #num of gnn layers
 gnndim=200
 
@@ -30,8 +68,8 @@ then
   max_epochs_before_stop=10
   ie_dim=400
 else
-  n_epochs=6
-  max_epochs_before_stop=15
+  n_epochs=30
+  max_epochs_before_stop=10
   ie_dim=400
 fi
 
@@ -39,7 +77,8 @@ max_seq_len=100
 ent_emb=tzw
 
 # Added for GreaseLM
-info_exchange=false
+ 
+info_exchange=true
 ie_layer_num=1
 resume_checkpoint=None
 resume_id=None
@@ -55,19 +94,28 @@ echo "gnn: dim $gnndim layer $k"
 echo "ie_dim: ${ie_dim}, info_exchange: ${info_exchange}"
 echo "******************************"
 
+save_dir_pref='runs'
+mkdir -p ${save_dir_pref}/${dataset}/${run_name}
 
 run_name=greaselm__ds_${dataset}__enc_${encoder}__k${k}__sd${seed}__iedim${ie_dim}__${dt}
 log=logs/train_${dataset}__${run_name}.log.txt
+
+
+source /home/${STUDENT_ID}/miniconda3/bin/activate greaselm
 
 ###### Training ######
 python3 -u greaselm.py \
     --dataset $dataset \
     --encoder $encoder -k $k --gnn_dim $gnndim -elr $elr -dlr $dlr -bs $bs --seed $seed -mbs ${mbs} --unfreeze_epoch ${unfreeze_epoch} --encoder_layer=${encoder_layer} -sl ${max_seq_len} --max_node_num ${max_node_num} \
     --n_epochs $n_epochs --max_epochs_before_stop ${max_epochs_before_stop} \
-    --save_dir ../autodl-tmp/roberta_aug4_new_v1 \
+    --save_dir ${save_dir_pref}/${dataset}/${run_name} \
     --run_name ${run_name} \
-    --log_interval 400 \
     --ie_dim ${ie_dim} --info_exchange ${info_exchange} --ie_layer_num ${ie_layer_num} --resume_checkpoint ${resume_checkpoint} --resume_id ${resume_id} --sep_ie_layers ${sep_ie_layers} --random_ent_emb ${random_ent_emb} --ent_emb ${ent_emb//,/ } --lr_schedule ${lr_schedule} \
-    $args 
+    $args \
+    --data_dir data/
 # > ${log} 2>&1 &
 # echo log: ${log}
+                        
+                                                                                                                                         	
+
+
