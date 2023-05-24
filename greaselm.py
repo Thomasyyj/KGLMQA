@@ -56,6 +56,7 @@ def load_data(args, devices, kg):
         max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
         is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
         subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg, augmentation_times=args.augmentation_times)
+    print(f'-----Augmentation_times:{args.augmentation_times} --------Training_size:{dataset.train_size()}-----')
 
     return dataset
 
@@ -64,7 +65,8 @@ def construct_model(args, kg):
     ########################################################
     #   Load pretrained concept embeddings
     ########################################################
-    cp_emb = [np.load(path) for path in args.ent_emb_paths]
+    # cp_emb = [np.load(path) for path in args.ent_emb_paths]
+    cp_emb = [np.load('../autodl-tmp/'+path) for path in args.ent_emb_paths]#only used in autodl
     cp_emb = np.concatenate(cp_emb, 1)
     cp_emb = torch.tensor(cp_emb, dtype=torch.float)
 
@@ -145,6 +147,9 @@ def calc_loss_and_acc(logits, labels, loss_type, loss_func):
     elif loss_type == 'cross_entropy':
         logits = logits.reshape(bs, num_choice)
         labels = labels.reshape(bs, num_choice)[:,0]
+        # logits (bs, num_choice)
+        # labels (bs, 1)
+        # loss_func=nn.CrossEntropy
         loss = loss_func(logits, labels)
     loss *= bs
 
@@ -173,6 +178,7 @@ def calc_eval_accuracy1(eval_set, model, loss_type, loss_func, debug, save_test_
             ####
             logits, _ = model(*input_data)
             logits = logits[:,:5]
+            # bs, 5
             labels = labels[:,:5]
             loss, n_corrects = calc_loss_and_acc(logits, labels, loss_type, loss_func)
 
@@ -426,45 +432,46 @@ def train(args, resume, has_test_split, devices, kg):
                 total_time = 0
             global_step += 1 # Number of batches processed up to now
 
-        # Save checkpoints and evaluate after every epoch
-        model.eval()
-        preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
-        dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+            # Save checkpoints and evaluate after every 20000 steps
+            if global_step%2125==0:
+                model.eval()
+                preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
+                dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
 
-        if has_test_split:
-            preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
-            test_total_loss, test_acc = calc_eval_accuracy1(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
-        else:
-            test_acc = 0
+                if has_test_split:
+                    preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
+                    test_total_loss, test_acc = calc_eval_accuracy1(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+                else:
+                    test_acc = 0
 
-        print('-' * 71)
-        print('| epoch {:3} | step {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, global_step, dev_acc, test_acc))
-        # print('| shuffled: | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc_shuffle, test_acc_shuffle))
-        print('-' * 71)
+                print('-' * 71)
+                print('| epoch {:3} | step {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, global_step, dev_acc, test_acc))
+                # print('| shuffled: | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc_shuffle, test_acc_shuffle))
+                print('-' * 71)
 
-        if not args.debug:
-            tb_writer.add_scalar('Dev/Acc', dev_acc, global_step)
-            tb_writer.add_scalar('Dev/Loss', dev_total_loss, global_step)
-            if has_test_split:
-                tb_writer.add_scalar('Test/Acc', test_acc, global_step)
-                tb_writer.add_scalar('Test/Loss', test_total_loss, global_step)
-            tb_writer.flush()
+                if not args.debug:
+                    tb_writer.add_scalar('Dev/Acc', dev_acc, global_step)
+                    tb_writer.add_scalar('Dev/Loss', dev_total_loss, global_step)
+                    if has_test_split:
+                        tb_writer.add_scalar('Test/Acc', test_acc, global_step)
+                        tb_writer.add_scalar('Test/Loss', test_total_loss, global_step)
+                    tb_writer.flush()
 
-        if dev_acc >= best_dev_acc:
-            save_ = 1
-            best_dev_acc = dev_acc
-            final_test_acc = test_acc
-            best_dev_epoch = epoch_id
-        if not args.debug:
-            with open(log_path, 'a') as fout:
-                fout.write('{:3},{:5},{:7.4f},{:7.4f},{:7.4f},{:7.4f},{:3}\n'.format(epoch_id, global_step, dev_acc, test_acc, best_dev_acc, final_test_acc, best_dev_epoch))
+                if dev_acc >= best_dev_acc:
+                    save_ = 1
+                    best_dev_acc = dev_acc
+                    final_test_acc = test_acc
+                    best_dev_epoch = epoch_id
+                if not args.debug:
+                    with open(log_path, 'a') as fout:
+                        fout.write('{:3},{:5},{:7.4f},{:7.4f},{:7.4f},{:7.4f},{:3}\n'.format(epoch_id, global_step, dev_acc, test_acc, best_dev_acc, final_test_acc, best_dev_epoch))
 
-        wandb.log({"dev_acc": dev_acc, "dev_loss": dev_total_loss, "best_dev_acc": best_dev_acc, "best_dev_epoch": best_dev_epoch}, step=global_step)
-        if has_test_split:
-            wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
+                wandb.log({"dev_acc": dev_acc, "dev_loss": dev_total_loss, "best_dev_acc": best_dev_acc, "best_dev_epoch": best_dev_epoch}, step=global_step)
+                if has_test_split:
+                    wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
 
         # Save the model checkpoint
-        if args.save_model and epoch_id>=2 and save_:
+        if args.save_model and epoch_id>=10 and save_:
             save_ = 0
             model_state_dict = model.state_dict()
             del model_state_dict["lmgnn.concept_emb.emb.weight"]
@@ -599,7 +606,7 @@ def main(args):
     args.wandb_id = wandb_id
 
     args.hf_version = transformers.__version__
-
+    print(args)
     with wandb.init(project="KG-LM", config=args, name=args.run_name, resume="allow", id=wandb_id, settings=wandb.Settings(start_method="fork"), mode=wandb_mode):
         print(socket.gethostname())
         print ("pid:", os.getpid())
@@ -669,7 +676,7 @@ if __name__ == '__main__':
     parser.add_argument('--unfreeze_epoch', default=4, type=int, help="Number of the first few epochs in which LM’s parameters are kept frozen.")
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--init_range', default=0.02, type=float, help='stddev when initializing with normal distribution')
-    parser.add_argument('--augmentation_times', default=4, type=int, help='how many times do we want to augment the data')
+    parser.add_argument('--augmentation_times', default=5, type=int, help='how many times do we want to augment the data')
 
     args = parser.parse_args()
     main(args)
