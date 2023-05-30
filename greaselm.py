@@ -471,7 +471,7 @@ def train(args, resume, has_test_split, devices, kg):
                     wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
 
         # Save the model checkpoint
-        if args.save_model and epoch_id>=10 and save_:
+        if args.save_model and epoch_id>=25 and save_:
             save_ = 0
             model_state_dict = model.state_dict()
             del model_state_dict["lmgnn.concept_emb.emb.weight"]
@@ -653,8 +653,8 @@ if __name__ == '__main__':
     parser.add_argument('-k', '--k', default=5, type=int, help='The number of GreaseLM layers')
     parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads of the final graph nodes\' pooling')
     parser.add_argument('--gnn_dim', default=100, type=int, help='dimension of the GNN layers')
-    parser.add_argument('--fc_dim', default=200, type=int, help='number of FC hidden units (except for the MInt operators)')
-    parser.add_argument('--fc_layer_num', default=0, type=int, help='number of hidden layers of the final MLP')
+    parser.add_argument('--fc_dim', default=400, type=int, help='number of FC hidden units (except for the MInt operators)')
+    parser.add_argument('--fc_layer_num', default=1, type=int, help='number of hidden layers of the final MLP')
     parser.add_argument('--freeze_ent_emb', default=True, type=utils.bool_flag, nargs='?', const=True, help='Whether to freeze the entity embedding layer.')
     parser.add_argument('--ie_dim', default=200, type=int, help='number of the hidden units of the MInt operator.')
     parser.add_argument('--info_exchange', default=True, choices=[True, False, "every-other-layer"], type=utils.bool_str_flag, help="Whether we have the MInt operator in every GreaseLM layer or every other GreaseLM layer or not at all.")
@@ -676,7 +676,7 @@ if __name__ == '__main__':
     parser.add_argument('--unfreeze_epoch', default=4, type=int, help="Number of the first few epochs in which LM’s parameters are kept frozen.")
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--init_range', default=0.02, type=float, help='stddev when initializing with normal distribution')
-    parser.add_argument('--augmentation_times', default=5, type=int, help='how many times do we want to augment the data')
+    parser.add_argument('--augmentation_times', default=1, type=int, help='how many times do we want to augment the data')
 
     args = parser.parse_args()
     main(args)

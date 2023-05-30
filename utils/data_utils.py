@@ -114,11 +114,13 @@ class GreaseLM_DataLoader(object):
         random.seed(2023)
         for i in self.shuffle_map:
             random.shuffle(i)
+        self.augmentation_times = augmentation_times
         ##--edit--
 
         # Load training data
         print ('train_statement_path', train_statement_path)
         self.train_qids, self.train_labels, self.train_encoder_data, train_concepts_by_sents_list = self.load_input_tensors(train_statement_path, max_seq_length)
+
         
         ##--edit--
         num_choice = self.train_encoder_data[0].size(1)#//augmentation_times
@@ -189,7 +191,17 @@ class GreaseLM_DataLoader(object):
         if self.debug:
             train_indexes = torch.arange(self.debug_sample_size)
         elif self.is_inhouse:
+            indexes_lst = torch.tensor([],dtype=torch.uint8)
             n_train = self.inhouse_train_indexes.size(0)
+            # ----- ordered
+            # n_train_before_aug = n_train//self.augmentation_times
+            # idx_lst = torch.arange(n_train_before_aug)
+            # train_indexes_per_epoch = torch.randperm(n_train_before_aug)
+            # for i in range(self.augmentation_times):
+            #     idx_lst_shuffled = (idx_lst*self.augmentation_times+i)[train_indexes_per_epoch]
+            #     indexes_lst = torch.cat((indexes_lst, idx_lst_shuffled), dim=0)
+            # train_indexes = self.inhouse_train_indexes[indexes_lst]
+            # ----- completely shuffled
             train_indexes = self.inhouse_train_indexes[torch.randperm(n_train)]
         else:
             train_indexes = torch.randperm(len(self.train_qids))
@@ -228,7 +240,8 @@ class GreaseLM_DataLoader(object):
 
         if kg == "cpnet":
             # Load cpnet
-            cpnet_vocab_path = "data/cpnet/concept.txt"
+            # cpnet_vocab_path = "data/cpnet/concept.txt"
+            cpnet_vocab_path = "../autodl-tmp/data/cpnet/concept.txt" # only used when using autodl 
             with open(cpnet_vocab_path, "r", encoding="utf8") as fin:
                 self.id2concept = [w.strip() for w in fin]
             self.concept2id = {w: i for i, w in enumerate(self.id2concept)}
@@ -819,12 +832,13 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, 
                 for t in range(nc):
                     #end = ['<ANS{}> '.format(idx) + i for idx, i in enumerate(example.endings)]
                     end = [ i for idx, i in enumerate(example.endings)]
-                    shuffled_endings = ['<ANS{}>'.format(idx)+end[i] for idx, i in enumerate(shuffle_map[aug_time])]
+                    shuffled_endings = ['<ANS{}> '.format(idx)+end[i]+' </s>' for idx, i in enumerate(shuffle_map[aug_time])]
                     shuffled_labels = shuffle_map[aug_time].index(example.label)
                     endings = ' '.join(shuffled_endings)
                     ans = example.question + " " +endings
-
-                    encoded_input = tokenizer(example.contexts[0], ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
+                    
+                    encoded_input = tokenizer(example.contexts[0], ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True) # delete the </s> </s>
+                     
                     input_ids = encoded_input["input_ids"]
                     output_mask = encoded_input["special_tokens_mask"]
                     input_mask = encoded_input["attention_mask"]
@@ -951,7 +965,7 @@ def load_bert_xlnet_roberta_input_tensors1(statement_jsonl_path, max_seq_length,
             labels = []
             for t in range(1*nc):
                 end = [ i for idx, i in enumerate(example.endings)]
-                shuffled_endings = ['<ANS{}>'.format(idx)+i for idx, i in enumerate(end)]
+                shuffled_endings = ["<ANS{}> ".format(idx) + i +' </s>' for idx, i in enumerate(end)]
                 endings = ' '.join(shuffled_endings)
                 ans = example.question + " " +endings
 

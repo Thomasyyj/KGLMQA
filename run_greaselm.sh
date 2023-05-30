@@ -9,11 +9,11 @@ encoder='roberta-large'
 args=$@
 
 
-elr="5e-6"
+elr="1e-5"
 dlr="1e-3"
 bs=4
 mbs=4
-unfreeze_epoch=1
+unfreeze_epoch=0
 # unfreeze_epoch=0
 k=5 #num of gnn layers
 gnndim=200
@@ -30,8 +30,8 @@ then
   max_epochs_before_stop=10
   ie_dim=400
 else
-  n_epochs=6
-  max_epochs_before_stop=15
+  n_epochs=20
+  max_epochs_before_stop=10
   ie_dim=400
 fi
 
@@ -64,9 +64,9 @@ python3 -u greaselm.py \
     --dataset $dataset \
     --encoder $encoder -k $k --gnn_dim $gnndim -elr $elr -dlr $dlr -bs $bs --seed $seed -mbs ${mbs} --unfreeze_epoch ${unfreeze_epoch} --encoder_layer=${encoder_layer} -sl ${max_seq_len} --max_node_num ${max_node_num} \
     --n_epochs $n_epochs --max_epochs_before_stop ${max_epochs_before_stop} \
-    --save_dir ../autodl-tmp/roberta_aug4_new_v1 \
+    --save_dir ../autodl-tmp/roberta_mlp_aug1_max \
     --run_name ${run_name} \
-    --log_interval 400 \
+    --log_interval 500 \
     --ie_dim ${ie_dim} --info_exchange ${info_exchange} --ie_layer_num ${ie_layer_num} --resume_checkpoint ${resume_checkpoint} --resume_id ${resume_id} --sep_ie_layers ${sep_ie_layers} --random_ent_emb ${random_ent_emb} --ent_emb ${ent_emb//,/ } --lr_schedule ${lr_schedule} \
     $args 
 # > ${log} 2>&1 &

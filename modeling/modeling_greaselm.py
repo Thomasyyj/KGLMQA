@@ -177,7 +177,7 @@ class LMGNN(nn.Module):
         # nn.GELU(),
         # nn.Linear(concat_vec_dim, fc_dim),
         # )
-        self.fc = layers.MLP(config.hidden_size, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
+        self.fc = layers.MLP(2*config.hidden_size, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
         # self.fc = layers.MLP(concat_vec_dim, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
         # self.proj1 = nn.Linear(concept_dim, concept_dim, bias=False)
         # self.proj2 = nn.Linear(concept_dim, 1, bias=False)
@@ -217,14 +217,17 @@ class LMGNN(nn.Module):
         #LM inputs
         ##--edit
         input_ids, attention_mask, token_type_ids, output_mask, ans_mask = inputs
-        ans_mask = ans_mask[:,:-1]
+        end_idx = ans_mask[::nc_input,-1].reshape(-1,1)
+        ans_mask = ans_mask[:,:-1] # the last node is the idx of the end of the sentance
         _, ans_idx = ans_mask.nonzero(as_tuple=True) # bs*nc, ori_nc , note that (nc = ori_nc * agumentation_times)
         ori_nc = 5
-        ans_idx = ans_idx.reshape(bs_input*nc_input, 5)
+        ans_idx = ans_idx.reshape(bs_input*nc_input, nc_input)
         cur_nc_idx = torch.eye(ori_nc).type(torch.bool).repeat(bs_input,1) # (bs*nc, ori_nc)
         query_idx = ans_idx[cur_nc_idx] # bs*nc
-        key_idx = ans_idx[~cur_nc_idx].reshape(bs_input*nc_input, ori_nc-1) # bs*nc, nc-1
-        ans_mask = (query_idx, key_idx, ans_idx)
+        # key_idx = ans_idx[~cur_nc_idx].reshape(bs_input*nc_input, ori_nc-1) # bs*nc, nc-1
+        # ans_mask = (query_idx, key_idx, ans_idx)
+        ans_idx = ans_idx[cur_nc_idx].reshape(bs_input, nc_input) # bs, nc
+        span_idx = torch.cat((ans_idx, end_idx), dim=-1).unfold(1,2,1).reshape(bs_input*nc_input, 2)
         # ##--edit
 
         # GNN inputs
@@ -252,16 +255,16 @@ class LMGNN(nn.Module):
         # LM outputs
         all_hidden_states = outputs[-1] # ([bs, seq_len, sent_dim] for _ in range(25))
         hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
+
         
-        ### layerwise ####
-        # bs_, seq_len_, sent_dim_ = all_hidden_states[-1].size()
-        # hidden_states = torch.cat([all_hidden_states[i][:, 0, :].view(bs_, 1, sent_dim_) for i in reversed(range(len(all_hidden_states)))], dim=1) # [bs, 25, sent_dim]
-        # sent_vecs = self.mp.layerwise_pooler(hidden_states.clone()) # [bs, sent_dim]
-        
-        #### baseline ####
+        #### edit ####
         hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
         bs = hidden_states.size(0)
-        sent_vecs = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
+        s_vecs = hidden_states[:, 0, :] # [bs, sent_dim]
+        # sent_vecs = torch.cat([torch.mean(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0).unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
+        sent_vecs = torch.cat([torch.max(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0)[0].unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
+        # sent_vecs = hidden_states[torch.arange(bs), query_idx, :] # [bs, sent_dim]
+        # sent_vecs = torch.cat([torch.mean(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0).unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
 
         #ans_vecs = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
         # sent_vecs = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
@@ -334,7 +337,8 @@ class LMGNN(nn.Module):
         
 #         sent_node_mask = special_nodes_mask.clone()
 #         sent_node_mask[:, 0] = 0
-        concat = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1)
+        concat = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1) 
+        sent_vecs = torch.cat((s_vecs, sent_vecs), dim=1) # edit [bs, 2*sent_dim]
         logits = self.fc(self.dropout_fc(sent_vecs))
         logits = logits.view(bs_input, nc_input).contiguous()
         if cache_output:
