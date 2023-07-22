@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import modeling_bert
-from transformers import modeling_roberta, RobertaTokenizer
+from transformers import modeling_roberta
 from transformers import PretrainedConfig
 from transformers.file_utils import (
     TF2_WEIGHTS_NAME,
@@ -19,7 +19,6 @@ from transformers.file_utils import (
 from modeling import modeling_gnn
 from utils import layers
 from utils import utils
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ class GreaseLM(nn.Module):
                  pretrained_concept_emb=None, freeze_ent_emb=True,
                  init_range=0.02, ie_dim=200, info_exchange=True, ie_layer_num=1, sep_ie_layers=False, layer_id=-1):
         super().__init__()
-        self.lmgnn = LMGNN(args, model_name, k, n_ntype, n_etype, 
+        self.lmgnn = LMGNN(args, model_name, k, n_ntype, n_etype,
                                         n_concept, concept_dim, concept_in_dim, n_attention_head,
                                         fc_dim, n_fc_layer, p_emb, p_gnn, p_fc, pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb,
                                         init_range=init_range, ie_dim=ie_dim, info_exchange=info_exchange, ie_layer_num=ie_layer_num,  sep_ie_layers=sep_ie_layers, layer_id=layer_id)
@@ -56,7 +55,7 @@ class GreaseLM(nn.Module):
         edge_type = torch.cat(edge_type_init, dim=0) #[total_E, ]
         return edge_index, edge_type
 
-    def forward(self, *inputs, cache_output=False, detail=False, unfreeze=True):
+    def forward(self, *inputs, cache_output=False, detail=False):
         """
         inputs_ids: (batch_size, num_choice, seq_len)    -> (batch_size * num_choice, seq_len)
         concept_ids: (batch_size, num_choice, n_node)  -> (batch_size * num_choice, n_node)
@@ -76,21 +75,21 @@ class GreaseLM(nn.Module):
 
         #Here, merge the batch dimension and the num_choice dimension
         edge_index_orig, edge_type_orig = inputs[-2:]
-        ##--edit--
-        _inputs = [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:5]] + [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[5:-2]] + [sum(x,[]) for x in inputs[-2:]]
-        ##--edit--
+        _inputs = [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:4]] + [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[4:-2]] + [sum(x,[]) for x in inputs[-2:]]
 
         *lm_inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, edge_index, edge_type = _inputs
         node_scores = torch.zeros_like(node_scores)
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
         adj = (edge_index.to(node_type_ids.device), edge_type.to(node_type_ids.device)) #edge_index: [2, total_E]   edge_type: [total_E, ]
-        logits, attn = self.lmgnn(bs, nc, lm_inputs, concept_ids,
+
+        logits, attn, sent_vecs = self.lmgnn(lm_inputs, concept_ids,
                                     node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj,
-                                    emb_data=None, cache_output=cache_output, unfreeze=unfreeze)
+                                    emb_data=None, cache_output=cache_output)
         # logits: [bs * nc]
-        # logits = logits.view(bs, nc)
+        logits = logits.view(bs, nc)
+        sent_vecs  = sent_vecs.view(bs, nc, -1) # bs, nc, sent_dim
         if not detail:
-            return logits, attn
+            return logits, attn, sent_vecs
         else:
             return logits, attn, concept_ids.view(bs, nc, -1), node_type_ids.view(bs, nc, -1), edge_index_orig, edge_type_orig
             # edge_index_orig: list of (batch_size, num_choice). each entry is torch.tensor(2, E)
@@ -139,7 +138,7 @@ def test_GreaseLM(device):
 
 class LMGNN(nn.Module):
 
-    def __init__(self, args={}, model_name="roberta-large", k=5, n_ntype=4, n_etype=38, 
+    def __init__(self, args={}, model_name="roberta-large", k=5, n_ntype=4, n_etype=38,
                  n_concept=799273, concept_dim=200, concept_in_dim=1024, n_attention_head=2,
                  fc_dim=200, n_fc_layer=0, p_emb=0.2, p_gnn=0.2, p_fc=0.2,
                  pretrained_concept_emb=None, freeze_ent_emb=True,
@@ -163,33 +162,17 @@ class LMGNN(nn.Module):
             self.pooler = layers.MultiheadAttPoolLayer(n_attention_head, config.hidden_size, concept_dim)
 
         concat_vec_dim = concept_dim * 2 + config.hidden_size
-        ####
-        # self.cross_pooler = layers.MultiheadAttPoolLayer(n_attention_head, config.hidden_size, concept_dim)
-        # self.fc = layers.MLP(concat_vec_dim, fc_dim, 5, n_fc_layer, p_fc, layer_norm=True)
+        # self.fc = layers.MLP(concat_vec_dim, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
+        self.fc = layers.MLP(config.hidden_size, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
 
         self.dropout_e = nn.Dropout(p_emb)
         self.dropout_fc = nn.Dropout(p_fc)
-        ####
-        # self.proj = nn.Sequential(
-        # nn.Linear(concat_vec_dim, concat_vec_dim),
-        # nn.Dropout(0.2),
-        # nn.LayerNorm(concat_vec_dim),
-        # nn.GELU(),
-        # nn.Linear(concat_vec_dim, fc_dim),
-        # )
-        self.fc = layers.MLP(2*config.hidden_size, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
-        # self.fc = layers.MLP(concat_vec_dim, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
-        # self.proj1 = nn.Linear(concept_dim, concept_dim, bias=False)
-        # self.proj2 = nn.Linear(concept_dim, 1, bias=False)
-        # self.proj3 = nn.Linear(concept_dim, 1, bias=False)
-        # self.proj_bias = torch.tensor(0.0, requires_grad=True)
-        # self.sigmoid = nn.Sigmoid()
 
         if init_range > 0:
             self.apply(self._init_weights)
 
         self.mp, self.loading_info = TextKGMessagePassing.from_pretrained(model_name, output_hidden_states=True, output_loading_info=True, args=args, k=k, n_ntype=n_ntype, n_etype=n_etype, dropout=p_gnn, concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange, ie_layer_num=ie_layer_num, sep_ie_layers=sep_ie_layers)
-        
+
         self.layer_id = layer_id
         self.cpnet_vocab_size = n_concept
 
@@ -202,7 +185,7 @@ class LMGNN(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def forward(self, bs_input, nc_input, inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj, emb_data=None, cache_output=False, unfreeze=True):
+    def forward(self, inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj, emb_data=None, cache_output=False):
         """
         concept_ids: (batch_size, n_node)
         adj: edge_index, edge_type
@@ -215,20 +198,7 @@ class LMGNN(nn.Module):
         logits: [bs]
         """
         #LM inputs
-        ##--edit
-        input_ids, attention_mask, token_type_ids, output_mask, ans_mask = inputs
-        end_idx = ans_mask[::nc_input,-1].reshape(-1,1)
-        ans_mask = ans_mask[:,:-1] # the last node is the idx of the end of the sentance
-        _, ans_idx = ans_mask.nonzero(as_tuple=True) # bs*nc, ori_nc , note that (nc = ori_nc * agumentation_times)
-        ori_nc = 5
-        ans_idx = ans_idx.reshape(bs_input*nc_input, nc_input)
-        cur_nc_idx = torch.eye(ori_nc).type(torch.bool).repeat(bs_input,1) # (bs*nc, ori_nc)
-        query_idx = ans_idx[cur_nc_idx] # bs*nc
-        # key_idx = ans_idx[~cur_nc_idx].reshape(bs_input*nc_input, ori_nc-1) # bs*nc, nc-1
-        # ans_mask = (query_idx, key_idx, ans_idx)
-        ans_idx = ans_idx[cur_nc_idx].reshape(bs_input, nc_input) # bs, nc
-        span_idx = torch.cat((ans_idx, end_idx), dim=-1).unfold(1,2,1).reshape(bs_input*nc_input, 2)
-        # ##--edit
+        input_ids, attention_mask, token_type_ids, output_mask = inputs
 
         # GNN inputs
         concept_ids[concept_ids == 0] = self.cpnet_vocab_size + 2
@@ -237,7 +207,6 @@ class LMGNN(nn.Module):
         gnn_input = self.dropout_e(gnn_input) #(batch_size, n_node, dim_node)
 
         #Normalize node sore (use norm from Z)
-        node_scores = node_scores.unsqueeze(-1)
         _mask = (torch.arange(node_scores.size(1), device=node_scores.device) < adj_lengths.unsqueeze(1)).float() #0 means masked out #[batch_size, n_node]
         node_scores = -node_scores
         node_scores = node_scores - node_scores[:, 0:1, :] #[batch_size, n_node, 1]
@@ -248,7 +217,7 @@ class LMGNN(nn.Module):
         node_scores = node_scores.unsqueeze(2) #[batch_size, n_node, 1]
 
         # Merged core
-        outputs, gnn_output = self.mp(input_ids, token_type_ids, attention_mask, output_mask, ans_mask, gnn_input, adj, node_type_ids, node_scores, special_nodes_mask, output_hidden_states=True)
+        outputs, gnn_output = self.mp(input_ids, token_type_ids, attention_mask, output_mask, gnn_input, adj, node_type_ids, node_scores, special_nodes_mask, output_hidden_states=True)
         # outputs: ([bs, seq_len, sent_dim], [bs, sent_dim], ([bs, seq_len, sent_dim] for _ in range(25)))
         # gnn_output: [bs, n_node, dim_node]
 
@@ -256,29 +225,7 @@ class LMGNN(nn.Module):
         all_hidden_states = outputs[-1] # ([bs, seq_len, sent_dim] for _ in range(25))
         hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
 
-        
-        #### edit ####
-        hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
-        bs = hidden_states.size(0)
-        s_vecs = hidden_states[:, 0, :] # [bs, sent_dim]
-        # sent_vecs = torch.cat([torch.mean(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0).unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
-        sent_vecs = torch.cat([torch.max(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0)[0].unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
-        # sent_vecs = hidden_states[torch.arange(bs), query_idx, :] # [bs, sent_dim]
-        # sent_vecs = torch.cat([torch.mean(hidden_states[i, span_idx[i,0]:span_idx[i,1], :], dim=0).unsqueeze(0) for i in torch.arange(bs)], dim=0) # [bs, sent_dim]
-
-        #ans_vecs = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
-        # sent_vecs = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
-        
-        
-        #### attention pooling ####
-        # hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
-        # extended_attention_mask_ = (1 - attention_mask) * -10000.0
-        # sent_vecs = self.mp.out_pooler(hidden_states, extended_attention_mask_.unsqueeze(1).unsqueeze(1), clone=False) #new
-        
-        #### attention pooling2 ####
-        # hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
-        # extended_attention_mask_ = (1 - attention_mask) * -10000.0
-        # sent_vecs = self.mp.out_pooler(hidden_states, extended_attention_mask_.unsqueeze(1).unsqueeze(1), clone=True) #new
+        sent_vecs = self.mp.pooler(hidden_states) # [bs, sent_dim]
 
         sent_token_mask = output_mask.clone()
         sent_token_mask[:, 0] = 0
@@ -290,63 +237,26 @@ class LMGNN(nn.Module):
 
         mask = mask | (node_type_ids == 3) # pool over all KG nodes (excluding the context node)
         mask[mask.all(1), 0] = 0  # a temporary solution to avoid zero node
-        
+
         sent_vecs_for_pooler = sent_vecs
         graph_vecs, pool_attn = self.pooler(sent_vecs_for_pooler, gnn_output, mask)
-        
-        # logits = self.fc(self.dropout_fc(sent_vecs)).view(bs_input, nc_input).contiguous()
-        # gnn_output: [bs, n_node, dim_node]
         # graph_vecs: [bs, node_dim]
-        # structure 1
-#         if unfreeze:
-#             sent_vecs = sent_vecs.view(bs_input, nc_input, -1).contiguous()
-#             ans_vecs = ans_vecs.view(bs_input, nc_input, -1).contiguous()
-#             Z_vecs = Z_vecs.view(bs_input, nc_input, -1).contiguous() # (bs, nc, sent_dim)
-#             graph_vecs = graph_vecs.view(bs_input, nc_input, -1).contiguous()
 
-#             _, n_node, dim_node = gnn_output.size()
-#             gnn_output = gnn_output.view(bs_input, nc_input, n_node, dim_node).contiguous()
-#             mask = mask.view(bs_input, nc_input, n_node).contiguous()
+        sent_node_mask = special_nodes_mask.clone()
+        sent_node_mask[:, 0] = 0
 
-#             graph_vecs_for_pooler = graph_vecs
-            
-#             # bs = sent_vecs.size(0)
-#             # q = sent_vecs[torch.arange(bs), ans_mask[0], :] # bs*nc, hidden_dim
-#             # k = sent_vecs[torch.arange(bs).unsqueeze(1), ans_mask[2], :] # bs*nc, nc, hidden_dim
-#             # sent_vecs_mlp = self.cross_pooler(q, k) # bs*nc, nc, hidden_dim
-#             sent_vecs_pooler = sent_vecs
-#             logits = torch.tensor([], device='cuda:0')
-#             for i in range(nc_input):
-#                 H = graph_vecs[:, i, :]
-#                 gnn_key = torch.concat((gnn_output[:, :i, :, :], gnn_output[:, i+1:, :, :]), dim=1).view(bs_input*(nc_input-1), n_node, dim_node).contiguous()# (bs*nc-1, n_node, dim_node)
-#                 mask_key = torch.concat((mask[:, :i, :], mask[:, i+1:, :]), dim=1).view(bs_input*(nc_input-1), n_node).contiguous()# (bs*nc-1, n_node)
-#                 sent_vecs_query = sent_vecs_pooler[:, i, :].unsqueeze(1).repeat(1,(nc_input-1),1).reshape(bs_input*(nc_input-1), -1) # (bs*nc-1, 1024)
-#                 key, _ = self.pooler(sent_vecs_query, gnn_key, mask_key) # (bs*nc-1, dim_node)
-#                 key = key.view(bs_input, (nc_input-1), dim_node).contiguous() # (bs, nc-1, dim_node)
-#                 H_hat, _ = self.cross_pooler(sent_vecs_pooler[:, i, :], key) #(bs, node_dim)
-#                 H_bar = self.proj1(H_hat)  #(bs, node_dim)
-#                 g = self.sigmoid(self.proj2(H_bar)+self.proj3(H)+self.proj_bias) #(bs)
-#                 graph_vecs_out = g*H + (1-g)*(H-H_bar) #(bs, node_dim)
-#                 concat = torch.concat((Z_vecs[:, i, :], ans_vecs[:, i, :], graph_vecs_out), -1)
-#                 logits = torch.concat((logits, self.fc(self.dropout_fc(concat))), dim=1) #(bs, nc)
-#         else:
-#             concat = torch.cat((Z_vecs, ans_vecs, graph_vecs), 1)
-#             logits = self.fc(self.dropout_fc(concat)).unsqueeze(1) #(bs, nc)
-#             logits = logits.view(bs_input, nc_input).contiguous()
-#         ####
-        
-#         sent_node_mask = special_nodes_mask.clone()
-#         sent_node_mask[:, 0] = 0
-        concat = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1) 
-        sent_vecs = torch.cat((s_vecs, sent_vecs), dim=1) # edit [bs, 2*sent_dim]
-        logits = self.fc(self.dropout_fc(sent_vecs))
-        logits = logits.view(bs_input, nc_input).contiguous()
         if cache_output:
             self.concept_ids = concept_ids
             self.adj = adj
             self.pool_attn = pool_attn
-        
-        return logits, pool_attn
+
+        concat = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1)
+        if self.args.allow_graph is True:
+            logits = self.fc(self.dropout_fc(concat))
+        else:
+            assert self.args.info_exchange==False, 'To forbid graph info, please ensure both args.info_exchange and args.allow_graph are False.'
+            logits = self.fc(self.dropout_fc(sent_vecs))
+        return logits, pool_attn, sent_vecs
 
     def get_fake_inputs(self, device="cuda:0"):
         bs = 20
@@ -390,9 +300,7 @@ class TextKGMessagePassing(ModelClass):
 
     def __init__(self, config, args={}, k=5, n_ntype=4, n_etype=38, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
         super().__init__(config=config)
-        
-        self.args = args
-        self.vocab_size = config.vocab_size
+
         self.n_ntype = n_ntype
         self.n_etype = n_etype
 
@@ -417,25 +325,15 @@ class TextKGMessagePassing(ModelClass):
         self.dropout = nn.Dropout(dropout)
         self.dropout_rate = dropout
 
-        self.encoder = RoBERTaGAT(args, config, k=k, n_ntype=n_ntype, n_etype=n_etype, hidden_size=concept_dim, dropout=dropout, concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange, ie_layer_num=ie_layer_num, sep_ie_layers=sep_ie_layers)
+        self.encoder = RoBERTaGAT(config, k=k, n_ntype=n_ntype, n_etype=n_etype, hidden_size=concept_dim, dropout=dropout, concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange, ie_layer_num=ie_layer_num, sep_ie_layers=sep_ie_layers)
+
         self.sent_dim = config.hidden_size
-        
-        # special_tokens_embedding = nn.Parameter(torch.randn(5, self.sent_dim))
-        # self.embeddings.weight = nn.Parameter(torch.cat((self.embeddings.weight, special_tokens_embedding), dim=0))
 
-        
-        #### att_pooling ####
-        # self.out_pooler = AttentionPooling(self.encoder.sent_dim)
-
-        #### layerwise ####
-        # self.layerwise_pooler = LayerwisePooling(self.encoder.sent_dim)
-
-    def forward(self, input_ids, token_type_ids, attention_mask, special_tokens_mask, ans_mask, H, A, node_type, node_score, special_nodes_mask, cache_output=False, position_ids=None, head_mask=None, output_hidden_states=True):
+    def forward(self, input_ids, token_type_ids, attention_mask, special_tokens_mask, H, A, node_type, node_score, special_nodes_mask, cache_output=False, position_ids=None, head_mask=None, output_hidden_states=True):
         """
         input_ids: [bs, seq_len]
         token_type_ids: [bs, seq_len]
         attention_mask: [bs, seq_len]
-        ans_mask: [bs, seq_len]
         H: tensor of shape (batch_size, n_node, d_node)
             node features from the previous layer
         A: (edge_index, edge_type)
@@ -485,7 +383,7 @@ class TextKGMessagePassing(ModelClass):
             head_mask = head_mask.to(dtype=next(self.parameters()).dtype) # switch to fload if need + fp16 compatibility
         else:
             head_mask = [None] * self.config.num_hidden_layers
-        
+
         embedding_output = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids)
 
         # GNN inputs
@@ -517,12 +415,11 @@ class TextKGMessagePassing(ModelClass):
 
         # Merged core
         encoder_outputs, _X = self.encoder(embedding_output,
-                                       extended_attention_mask, special_tokens_mask, head_mask, ans_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_hidden_states=output_hidden_states)
+                                       extended_attention_mask, special_tokens_mask, head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_hidden_states=output_hidden_states)
 
         # LM outputs
         sequence_output = encoder_outputs[0]
-        # pooled_output = self.encoder.attention_pooling(sequence_output, extended_attention_mask, clone=False)
-        pooled_output = self.pooler(sequence_output) 
+        pooled_output = self.pooler(sequence_output)
 
         outputs = (sequence_output, pooled_output,) + encoder_outputs[1:]  # add hidden_states and attentions if they are here
 
@@ -832,11 +729,7 @@ class TextKGMessagePassing(ModelClass):
 
             model = xm.send_cpu_data_to_device(model, xm.xla_device())
             model.to(xm.xla_device())
-        
-        # tokenizer = RobertaTokenizer.from_pretrained('roberta-large')
-        # answer_tokens = ['<ANS{}>'.format(i) for i in range(5)] 
-        # num_added = tokenizer.add_tokens(answer_tokens, special_tokens=True)
-        # model.resize_token_embeddings(len(tokenizer))
+
         return model
 
     def get_fake_inputs(self, device="cuda:0"):
@@ -876,10 +769,9 @@ def test_TextKGMessagePassing(device):
 
 class RoBERTaGAT(modeling_bert.BertEncoder):
 
-    def __init__(self, args, config, k=5, n_ntype=4, n_etype=38, hidden_size=200, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
+    def __init__(self, config, k=5, n_ntype=4, n_etype=38, hidden_size=200, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
         super().__init__(config)
-        
-        self.args = args
+
         self.k = k
         self.edge_encoder = torch.nn.Sequential(torch.nn.Linear(n_etype + 1 + n_ntype * 2, hidden_size), torch.nn.BatchNorm1d(hidden_size), torch.nn.ReLU(), torch.nn.Linear(hidden_size, hidden_size))
         self.gnn_layers = nn.ModuleList([modeling_gnn.GATConvE(hidden_size, n_ntype, n_etype, self.edge_encoder) for _ in range(k)])
@@ -892,23 +784,16 @@ class RoBERTaGAT(modeling_bert.BertEncoder):
             self.ie_layers = nn.ModuleList([layers.MLP(self.sent_dim + concept_dim, ie_dim, self.sent_dim + concept_dim, ie_layer_num, p_fc) for _ in range(k)])
         else:
             self.ie_layer = layers.MLP(self.sent_dim + concept_dim, ie_dim, self.sent_dim + concept_dim, ie_layer_num, p_fc)
-            ### sep cls and attention poooling ###
-            # self.ie_layer = layers.MLP(self.sent_dim + self.sent_dim + concept_dim, ie_dim, self.sent_dim + concept_dim, ie_layer_num, p_fc)
 
         self.concept_dim = concept_dim
         self.num_hidden_layers = config.num_hidden_layers
         self.info_exchange = info_exchange
-        #### attention pooling ####
-        # self.attention_pooling = AttentionPooling(self.sent_dim)
-        # self.attention_pooling = MutiheadPooling(self.sent_dim, 4)
-        # self.answer_pooler = AnswerIntPooler(self.sent_dim, self.sent_dim, bs=self.args.batch_size, nc=5)
 
-    def forward(self, hidden_states, attention_mask, special_tokens_mask, head_mask, ans_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_attentions=False, output_hidden_states=True):
+    def forward(self, hidden_states, attention_mask, special_tokens_mask, head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_attentions=False, output_hidden_states=True):
         """
         hidden_states: [bs, seq_len, sent_dim]
         attention_mask: [bs, 1, 1, seq_len]
         head_mask: list of shape [num_hidden_layers]
-        ans_mask: [bs, seq_len]
 
         _X: [`total_n_nodes`, d_node] where `total_n_nodes` = b_size * n_node
         edge_index: [2, n_edges]
@@ -921,9 +806,6 @@ class RoBERTaGAT(modeling_bert.BertEncoder):
         all_attentions = ()
         for i, layer_module in enumerate(self.layer):
             # LM
-            # if i > self.num_hidden_layers - self.k:
-            #     hidden_states = torch.cat((context_node_lm_feats.unsqueeze(1), hidden_states[:, 1:, :]), dim=1)
-            
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -942,29 +824,20 @@ class RoBERTaGAT(modeling_bert.BertEncoder):
 
                 # Exchange info between LM and GNN hidden states (Modality interaction)
                 if self.info_exchange == True or (self.info_exchange == "every-other-layer" and (i - self.num_hidden_layers + self.k) % 2 == 0):
-                    X = _X.view(bs, -1, _X.size(1)) # [bs, max_num_nodes, node_dim] yyj
-                    # context_node_lm_feats = hidden_states[torch.arange(bs), ans_mask[0], :] # [bs, sent_dim]
-                    ##baseline##
+                    X = _X.view(bs, -1, _X.size(1)) # [bs, max_num_nodes, node_dim]
                     context_node_lm_feats = hidden_states[:, 0, :] # [bs, sent_dim]
-                    #ans_pool
-                    #context_node_lm_feats = self.answer_pooler(hidden_states, ans_mask) # new
-                    
                     context_node_gnn_feats = X[:, 0, :] # [bs, node_dim]
-                    
                     context_node_feats = torch.cat([context_node_lm_feats, context_node_gnn_feats], dim=1)
                     if self.sep_ie_layers:
                         context_node_feats = self.ie_layers[gnn_layer_index](context_node_feats)
                     else:
                         context_node_feats = self.ie_layer(context_node_feats)
                     context_node_lm_feats, context_node_gnn_feats = torch.split(context_node_feats, [context_node_lm_feats.size(1), context_node_gnn_feats.size(1)], dim=1)
-                    
-                    # hidden_states[torch.arange(bs), ans_mask[0], :] = context_node_lm_feats
                     hidden_states[:, 0, :] = context_node_lm_feats
                     X[:, 0, :] = context_node_gnn_feats
                     _X = X.view_as(_X)
 
         # Add last layer
-        # hidden_states = torch.cat((context_node_lm_feats.unsqueeze(1), hidden_states[:, 1:, :]), dim=1)
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -999,131 +872,6 @@ class RoBERTaGAT(modeling_bert.BertEncoder):
         assert outputs[0].size() == (bs, seq_len, self.sent_dim)
         n_node = 200
         assert _X.size() == (bs * n_node, self.concept_dim)
-        
-class AnswerIntPooler(nn.Module):
-    def __init__(self, sent_dim, hidden_dim, bs, nc, n_attention_head=2):
-        super().__init__()
-        self.sent_dim = sent_dim
-        self.hidden_dim = hidden_dim
-        self.nc_input = nc
-        self.cross_pooler = layers.MultiheadAttPoolLayer(n_attention_head, sent_dim, self.hidden_dim)
-        self.proj2 = nn.Linear(self.hidden_dim, 1, bias=False)
-        self.proj3 = nn.Linear(self.hidden_dim, 1, bias=False)
-        self.proj_bias = torch.tensor(0.0, requires_grad=True)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, hidden_states, ans_mask):
-        # hidden_states, (bs*nc, seq_len, self.hidden_dim)
-        # ans_mask, ((bs*nc), (bs*nc, nc-1))
-        # return: 
-        # hidden_states, (bs*nc, self.hidden_dim)
-        bsnc = hidden_states.size(0)
-        
-        # _, ans_idx = ans_mask.nonzero(as_tuple=True)
-        # ans_idx = ans_idx.reshape(bs*nc,nc)
-        # cur_nc_idx = torch.eye(nc).type(torch.bool).repeat(bs,1)
-        # query_idx = ans_idx[cur_nc_idx] # bs*nc
-        # key_idx = ans_idx[~cur_nc_idx].reshape(bs*nc,nc-1) # bs*nc, nc-1
-
-        H = hidden_states[torch.arange(bsnc), ans_mask[0], :] # bs*nc, hidden_size
-        query = H 
-        keys = hidden_states[torch.arange(bsnc).unsqueeze(1), ans_mask[1], :] # bs*nc, nc-1, hidden_size
-        H_bar, _ = self.cross_pooler(query, keys) #(bs, self.hidden_dim)
-        g = self.sigmoid(self.proj2(H_bar)+self.proj3(H)+self.proj_bias) #(bs)
-        out = g*H + (1-g)*(H-H_bar) #(bs, node_dim)
-        return out
-
-class LayerwisePooling(nn.Module):
-    def __init__(self, in_dim):
-        super().__init__()
-        self.attention = nn.Sequential(
-        nn.Linear(in_dim, in_dim),
-        nn.LayerNorm(in_dim),
-        nn.GELU(),
-        nn.Linear(in_dim, 1),
-        )
-        self.dropout = nn.Dropout(p=0.2, inplace=False)
-
-    def forward(self, hidden_states):
-        # hidden_states: [bs, seq_len, sent_dim]
-        w = self.attention(hidden_states).float() # (bs, seq_len, 1)
-        w = torch.softmax(w,1) # (bs, seq_len, 1)
-        w = self.dropout(w)
-        attention_embeddings = torch.sum(w * hidden_states, dim=1) # (bs, sent_dim)
-        return attention_embeddings
-
-class AttentionPoolingLastLayer(nn.Module):
-    def __init__(self, in_dim):
-        super().__init__()
-        self.attention = nn.Sequential(
-        nn.Linear(in_dim, in_dim),
-        nn.LayerNorm(in_dim),
-        nn.GELU(),
-        nn.Linear(in_dim, 1),
-        )
-        self.dropout1 = nn.Dropout(p=0.1, inplace=False)
-        self.dropout2 = nn.Dropout(p=0.1, inplace=False)
-
-    def forward(self, graph_vecs, sent_vecs, Z_vecs):
-        # graph_vecs, (bs, nc, sent_dim)
-        # sent_vecs, (bs, nc, node_dim)
-        # Z_vecs, (bs, nc, dim_node)
-        
-        w = self.attention(hidden_states).float() # (bs, seq_len, 1)
-        attention_mask = attention_mask.squeeze(1).squeeze(1)
-        w = w.squeeze(-1)
-        w = w + attention_mask
-        w = torch.softmax(w,1) # (bs, seq_len)
-        w = self.dropout1(w)
-        attention_embeddings = torch.sum(w.unsqueeze(-1) * hidden_states, dim=1)  # (bs, sent_dim)
-        attention_embeddings = self.dropout2(attention_embeddings)
-        return attention_embeddings
-        
-class AttentionPooling(nn.Module):
-    def __init__(self, in_dim):
-        super().__init__()
-        self.attention = nn.Sequential(
-        nn.Linear(in_dim, in_dim),
-        nn.LayerNorm(in_dim),
-        nn.GELU(),
-        nn.Linear(in_dim, 1),
-        )
-        self.dropout1 = nn.Dropout(p=0.1, inplace=False)
-        self.dropout2 = nn.Dropout(p=0.1, inplace=False)
-
-    def forward(self, hidden_states_input, attention_mask, clone=True):
-        # hidden_states: [bs, seq_len, sent_dim]
-        # attention_mask: [bs, 1, 1, seq_len]
-        if clone:
-            hidden_states = torch.cat((hidden_states_input[:, 0, :].unsqueeze(1), hidden_states_input[:, 1:, :].clone()), 1)
-        else:
-            hidden_states = hidden_states_input
-        
-        w = self.attention(hidden_states).float() # (bs, seq_len, 1)
-        attention_mask = attention_mask.squeeze(1).squeeze(1)
-        w = w.squeeze(-1)
-        w = w + attention_mask
-        w = torch.softmax(w,1) # (bs, seq_len)
-        w = self.dropout1(w)
-        attention_embeddings = torch.sum(w.unsqueeze(-1) * hidden_states, dim=1)  # (bs, sent_dim)
-        attention_embeddings = self.dropout2(attention_embeddings)
-        return attention_embeddings
-    
-class MeanPooling(nn.Module):
-    def __init__(self, in_dim):
-        super().__init__()
-
-    def forward(self, hidden_states, attention_mask, clone=True):
-        # hidden_states: [bs, seq_len, sent_dim]
-        # attention_mask: [bs, 1, 1, seq_len]
-        # hidden_states = torch.cat((hidden_states_input[:, 0, :].unsqueeze(1), hidden_states_input[:, 1:, :].clone()), 1)
-        attention_mask = (attention_mask.squeeze(1).squeeze(1)+10000)/10000
-        sum_embeddings = torch.sum(hidden_states * attention_mask.unsqueeze(-1), 1) #(bs, sent_dim)
-        sum_mask = attention_mask.sum(1)
-        sum_mask = torch.clamp(sum_mask, min = 1e-9)
-        mean_embeddings = sum_embeddings/sum_mask.unsqueeze(-1)
-        embeddings_except_cls = torch.sum(hidden_states[:, 1:, :] * attention_mask[:, 1:].unsqueeze(-1), 1)/sum_mask.unsqueeze(-1)
-        return mean_embeddings
 
 
 def test_RoBERTaGAT(device):

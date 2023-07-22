@@ -48,7 +48,7 @@ def add_data_arguments(parser):
     parser.add_argument('-ds', '--dataset', default='csqa', choices=DATASET_LIST, help='dataset name')
     parser.add_argument('--data_dir', default='data', type=str, help='Path to the data directory')
     parser.add_argument('-ih', '--inhouse', type=utils.bool_flag, nargs='?', const=True, help='run in-house setting')
-    parser.add_argument('--inhouse_train_qids', default='data/{dataset}/inhouse_split_qids.txt', help='qids of the in-house training set')
+    parser.add_argument('--inhouse_train_qids', default='{data_dir}/{dataset}/inhouse_split_qids.txt', help='qids of the in-house training set')
     # statements
     parser.add_argument('--train_statements', default='{data_dir}/{dataset}/statement/train.statement.jsonl')
     parser.add_argument('--dev_statements', default='{data_dir}/{dataset}/statement/dev.statement.jsonl')

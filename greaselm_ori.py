@@ -17,8 +17,7 @@ except:
 import wandb
 
 from modeling import modeling_greaselm
-from utils import data_utils as data_utils_ori
-# from utils import data_utils_kg as data_utils
+from utils import data_utils
 from utils import optimization_utils
 from utils import parser_utils
 from utils import utils
@@ -48,27 +47,16 @@ def load_data(args, devices, kg):
     #########################################################
     # Construct the dataset
     #########################################################
-    # dataset = data_utils.GreaseLM_DataLoader(args.train_statements, args.train_adj,
-    #     args.dev_statements, args.dev_adj,
-    #     args.test_statements, args.test_adj,
-    #     batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
-    #     device=devices,
-    #     model_name=args.encoder,
-    #     max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
-    #     is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-    #     subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg, augmentation_times=args.augmentation_times)
-    # print(f'-----Augmentation_times:{args.augmentation_times} --------Training_size:{dataset.train_size()}-----')
-    
-    dataset = data_utils_ori.GreaseLM_DataLoader(args.data_dir + '/csqa/statement/train.statement.jsonl', args.train_adj,
-         args.data_dir+'/csqa/statement/dev.statement.jsonl', args.dev_adj,
-        args.data_dir+'/csqa/statement/test.statement.jsonl', args.test_adj,
+    dataset = data_utils.GreaseLM_DataLoader(args.train_statements, args.train_adj,
+        args.dev_statements, args.dev_adj,
+        args.test_statements, args.test_adj,
         batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
         device=devices,
         model_name=args.encoder,
         max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
-        is_inhouse=True, inhouse_train_qids_path=args.inhouse_train_qids,
+        is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
         subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg)
-    
+
     return dataset
 
 
@@ -76,8 +64,7 @@ def construct_model(args, kg):
     ########################################################
     #   Load pretrained concept embeddings
     ########################################################
-    # cp_emb = [np.load(path) for path in args.ent_emb_paths]
-    cp_emb = [np.load(args.data_dir+'/../'+path) for path in args.ent_emb_paths]
+    cp_emb = [np.load(path) for path in args.ent_emb_paths]
     cp_emb = np.concatenate(cp_emb, 1)
     cp_emb = torch.tensor(cp_emb, dtype=torch.float)
 
@@ -142,12 +129,12 @@ def count_parameters(loaded_params, not_loaded_params):
     print('num_loaded_params:', num_loaded_params)
     print('num_total_params:', num_params + num_fixed_params + num_loaded_params)
 
-def calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func):
+
+def calc_loss_and_acc(logits, labels, loss_type, loss_func):
     bs = labels.size(0)
-    # labels: bs, 
-    # sent_vecs, bs, nc, sent_dim
+
     if loss_type == 'margin_rank':
-        bs = logits.size(0)
+        num_choice = logits.size(1)
         flat_logits = logits.view(-1)
         correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
         correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
@@ -160,55 +147,7 @@ def calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func):
 
     n_corrects = (logits.argmax(1) == labels).sum().item()
 
-    similarity_matrix = F.cosine_similarity(sent_vecs.unsqueeze(2), sent_vecs.unsqueeze(1), dim=3) # bs, nc, nc
-    contrast_loss_matrix = torch.clamp(similarity_matrix, min=0)
-    # Remove diagonal elements
-    bs_input, nc_input, _ = sent_vecs.size()
-    tmp_mask = ~torch.eye(nc_input, dtype=torch.bool, device=sent_vecs.device)
-    contrast_loss = contrast_loss_matrix.masked_select(tmp_mask.unsqueeze(0)).view(bs_input, nc_input, nc_input - 1).contiguous()
-    contrast_loss = torch.mean(contrast_loss, dim=-1) # bs, nc
-    contrast_loss = contrast_loss[torch.arange(bs_input), labels]
-
-    return loss, n_corrects, torch.mean(contrast_loss)
-
-
-def calc_eval_accuracy_test(eval_set, model, loss_type, loss_func, debug, save_test_preds, preds_path):
-    """Eval on the dev or test set - calculate loss and accuracy"""
-    total_loss_acm = 0.0
-    n_samples_acm = n_corrects_acm = 0
-    model.eval()
-    if save_test_preds:
-        utils.check_path(preds_path)
-        f_preds = open(preds_path, 'w')
-    with torch.no_grad():
-        for qids, labels, *input_data in eval_set:
-            bs = labels.size(0)
-            ####
-            # mask the question
-            # bs, nc, eml = input_data[0].shape
-            # question_len = [(input_data[0] == 2).nonzero()[[15*i]][:, 2] for i in range(bs)] #bs
-            # for i_bs, idx in enumerate(question_len):
-            #     input_data[0][i_bs, :, 1:idx] = torch.randint(1, 10000, (nc, idx-1))
-            ####
-            logits, _, sent_vecs = model(*input_data)
-            logits = logits[:,:5]
-            # bs, 5
-            labels = labels[:,:5]
-            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func)
-
-            total_loss_acm += loss.item()
-            n_corrects_acm += n_corrects
-            n_samples_acm += bs
-            if save_test_preds:
-                predictions = logits.argmax(1) #[bsize, ]
-                for qid, pred in zip(qids, predictions):
-                    print ('{},{}'.format(qid, chr(ord('A') + pred.item())), file=f_preds)
-                    f_preds.flush()
-            if debug:
-                break
-    if save_test_preds:
-        f_preds.close()
-    return total_loss_acm / n_samples_acm, n_corrects_acm / n_samples_acm
+    return loss, n_corrects
 
 
 def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_preds, preds_path):
@@ -220,18 +159,11 @@ def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_p
         utils.check_path(preds_path)
         f_preds = open(preds_path, 'w')
     with torch.no_grad():
-        for qids, labels, *input_data in eval_set:
+        for qids, labels, *input_data in tqdm(eval_set, desc="Dev/Test batch"):
             bs = labels.size(0)
-            ####
-            # mask the question
-            # bs, nc, eml = input_data[0].shape
-            # question_len = [(input_data[0] == 2).nonzero()[[15*i]][:, 2] for i in range(bs)] #bs
-            # for i_bs, idx in enumerate(question_len):
-            #     input_data[0][i_bs, :, 1:idx] = torch.randint(1, 10000, (nc, idx-1))
-            ####
-            logits, _, sent_vecs = model(*input_data)
+            logits, _ = model(*input_data)
 
-            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func)
+            loss, n_corrects = calc_loss_and_acc(logits, labels, loss_type, loss_func)
 
             total_loss_acm += loss.item()
             n_corrects_acm += n_corrects
@@ -248,11 +180,9 @@ def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_p
     return total_loss_acm / n_samples_acm, n_corrects_acm / n_samples_acm
 
 
-
-
-
 def train(args, resume, has_test_split, devices, kg):
-    accum_steps=args.accums_times
+    print("args: {}".format(args))
+
     if resume:
         args.save_dir = os.path.dirname(args.resume_checkpoint)
     if not args.debug:
@@ -281,9 +211,6 @@ def train(args, resume, has_test_split, devices, kg):
         test_dataloader = dataset.test()
 
     model = construct_model(args, kg)
-    answer_tokens = ['<ANS{}>'.format(i) for i in range(5)] 
-    #answer_tokens = ['<ANS>'] 
-    num_added = dataset.tokenizer.add_tokens(answer_tokens, special_tokens=True)
     model.lmgnn.mp.resize_token_embeddings(len(dataset.tokenizer))
 
     # Get the names of the loaded LM parameters
@@ -384,58 +311,50 @@ def train(args, resume, has_test_split, devices, kg):
     print('-' * 71)
 
     total_loss_acm = 0.0
-    total_contrast_loss_acm = 0.0
     n_samples_acm = n_corrects_acm = 0
     total_time = 0
-    save_=0
     model.train()
     # If all the parameters are frozen in the first few epochs, just skip those epochs.
     if len(params_to_freeze) >= len(list(model.parameters())) - 1:
         args.unfreeze_epoch = 0
     if last_epoch + 1 <= args.unfreeze_epoch:
         utils.freeze_params(params_to_freeze)
-        uf = False
     for epoch_id in trange(last_epoch + 1, args.n_epochs, desc="Epoch"):
         if epoch_id == args.unfreeze_epoch:
             utils.unfreeze_params(params_to_freeze)
-            uf = True
         if epoch_id == args.refreeze_epoch:
             utils.freeze_params(params_to_freeze)
         model.train()
 
-        for batch_num, (qids, labels, *input_data) in enumerate(train_dataloader):
+        for qids, labels, *input_data in tqdm(train_dataloader, desc="Batch"):
             # labels: [bs]
             start_time = time.time()
+            optimizer.zero_grad()
             bs = labels.size(0)
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
-                logits, _, sent_vecs = model(*[x[a:b] for x in input_data])
+                logits, _ = model(*[x[a:b] for x in input_data])
                 # logits: [bs, nc]
 
-                loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels[a:b], args.loss, loss_func)
-                total_contrast_loss_acm += contrast_loss*bs
+                loss, n_corrects = calc_loss_and_acc(logits, labels[a:b], args.loss, loss_func)
+
                 total_loss_acm += loss.item()
-                loss = loss / bs             
-                loss = loss / accum_steps
-                # if uf:
-                #     loss += 0.2*contrast_loss
+                loss = loss / bs
                 loss.backward()
                 n_corrects_acm += n_corrects
                 n_samples_acm += (b - a)
-            
+
+            if args.max_grad_norm > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             scheduler.step()
             # Gradients are accumulated and not back-proped until a batch is processed (not a mini-batch).
-            if ((batch_num+1)%accum_steps) == 0 or (batch_num + 1 == len(train_dataloader)):
-                if args.max_grad_norm > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
+            optimizer.step()
 
             total_time += (time.time() - start_time)
 
             if (global_step + 1) % args.log_interval == 0:
                 ms_per_batch = 1000 * total_time / args.log_interval
-                print('| step {:5} |  lr: {:9.7f} | total loss {:7.4f} | contrast loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_lr()[0], total_loss_acm / n_samples_acm, total_contrast_loss_acm / n_samples_acm, ms_per_batch))
+                print('| step {:5} |  lr: {:9.7f} | total loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_lr()[0], total_loss_acm / n_samples_acm, ms_per_batch))
 
                 if not args.debug:
                     tb_writer.add_scalar('Train/Lr', scheduler.get_lr()[0], global_step)
@@ -446,52 +365,46 @@ def train(args, resume, has_test_split, devices, kg):
                 wandb.log({"lr": scheduler.get_lr()[0], "train_loss": total_loss_acm / n_samples_acm, "train_acc": n_corrects_acm / n_samples_acm, "ms_per_batch": ms_per_batch}, step=global_step)
 
                 total_loss_acm = 0.0
-                total_contrast_loss_acm = 0.0
                 n_samples_acm = n_corrects_acm = 0
                 total_time = 0
             global_step += 1 # Number of batches processed up to now
 
-            # Save checkpoints and evaluate after every 20000 steps
-            if global_step%(2125)==0:
-                model.eval()
-                preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
-                dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+        # Save checkpoints and evaluate after every epoch
+        model.eval()
+        preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
+        dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+        if has_test_split:
+            preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
+            test_total_loss, test_acc = calc_eval_accuracy(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
+        else:
+            test_acc = 0
 
-                if has_test_split:
-                    preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
-                    test_total_loss, test_acc = calc_eval_accuracy(test_dataloader, model, args.loss, loss_func, args.debug, not args.debug, preds_path)
-                else:
-                    test_acc = 0
+        print('-' * 71)
+        print('| epoch {:3} | step {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, global_step, dev_acc, test_acc))
+        print('-' * 71)
 
-                print('-' * 71)
-                print('| epoch {:3} | step {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, global_step, dev_acc, test_acc))
-                # print('| shuffled: | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc_shuffle, test_acc_shuffle))
-                print('-' * 71)
+        if not args.debug:
+            tb_writer.add_scalar('Dev/Acc', dev_acc, global_step)
+            tb_writer.add_scalar('Dev/Loss', dev_total_loss, global_step)
+            if has_test_split:
+                tb_writer.add_scalar('Test/Acc', test_acc, global_step)
+                tb_writer.add_scalar('Test/Loss', test_total_loss, global_step)
+            tb_writer.flush()
 
-                if not args.debug:
-                    tb_writer.add_scalar('Dev/Acc', dev_acc, global_step)
-                    tb_writer.add_scalar('Dev/Loss', dev_total_loss, global_step)
-                    if has_test_split:
-                        tb_writer.add_scalar('Test/Acc', test_acc, global_step)
-                        tb_writer.add_scalar('Test/Loss', test_total_loss, global_step)
-                    tb_writer.flush()
+        if dev_acc >= best_dev_acc:
+            best_dev_acc = dev_acc
+            final_test_acc = test_acc
+            best_dev_epoch = epoch_id
+        if not args.debug:
+            with open(log_path, 'a') as fout:
+                fout.write('{:3},{:5},{:7.4f},{:7.4f},{:7.4f},{:7.4f},{:3}\n'.format(epoch_id, global_step, dev_acc, test_acc, best_dev_acc, final_test_acc, best_dev_epoch))
 
-                if dev_acc >= best_dev_acc:
-                    save_ = 1
-                    best_dev_acc = dev_acc
-                    final_test_acc = test_acc
-                    best_dev_epoch = epoch_id
-                if not args.debug:
-                    with open(log_path, 'a') as fout:
-                        fout.write('{:3},{:5},{:7.4f},{:7.4f},{:7.4f},{:7.4f},{:3}\n'.format(epoch_id, global_step, dev_acc, test_acc, best_dev_acc, final_test_acc, best_dev_epoch))
-
-                wandb.log({"dev_acc": dev_acc, "dev_loss": dev_total_loss, "best_dev_acc": best_dev_acc, "best_dev_epoch": best_dev_epoch}, step=global_step)
-                if has_test_split:
-                    wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
+        wandb.log({"dev_acc": dev_acc, "dev_loss": dev_total_loss, "best_dev_acc": best_dev_acc, "best_dev_epoch": best_dev_epoch}, step=global_step)
+        if has_test_split:
+            wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
 
         # Save the model checkpoint
-        if args.save_model and epoch_id>=0 and save_:
-            save_ = 0
+        if args.save_model:
             model_state_dict = model.state_dict()
             del model_state_dict["lmgnn.concept_emb.emb.weight"]
             checkpoint = {"model": model_state_dict, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "epoch": epoch_id, "global_step": global_step, "best_dev_epoch": best_dev_epoch, "best_dev_acc": best_dev_acc, "final_test_acc": final_test_acc, "config": args}
@@ -535,14 +448,9 @@ def evaluate(args, has_test_split, devices, kg):
 
     dataset = load_data(args, devices, kg)
     dev_dataloader = dataset.dev()
-    train_dataloader = dataset.train()
     if has_test_split:
         test_dataloader = dataset.test()
     model = construct_model(args, kg)
-    ##edit##
-    answer_tokens = ['<ANS{}>'.format(i) for i in range(5)] 
-    #answer_tokens = ['<ANS>'] 
-    num_added = dataset.tokenizer.add_tokens(answer_tokens, special_tokens=True)
     model.lmgnn.mp.resize_token_embeddings(len(dataset.tokenizer))
 
     model.load_state_dict(checkpoint["model"], strict=False)
@@ -570,10 +478,8 @@ def evaluate(args, has_test_split, devices, kg):
 
     model.eval()
     # Evaluation on the dev set
-    preds_path = os.path.join(args.save_dir, 'train_e{}_preds.csv'.format(epoch_id))
-    train_total_loss, train_acc = calc_eval_accuracy(train_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
     preds_path = os.path.join(args.save_dir, 'dev_e{}_preds.csv'.format(epoch_id))
-    dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, debug, not debug, preds_path, 1)
+    dev_total_loss, dev_acc = calc_eval_accuracy(dev_dataloader, model, args.loss, loss_func, debug, not debug, preds_path)
     if has_test_split:
         # Evaluation on the test set
         preds_path = os.path.join(args.save_dir, 'test_e{}_preds.csv'.format(epoch_id))
@@ -582,7 +488,7 @@ def evaluate(args, has_test_split, devices, kg):
         test_acc = 0
 
     print('-' * 71)
-    print('train_acc {:7.4f}, dev_acc {:7.4f}, test_acc {:7.4f}'.format(train_acc, dev_acc, test_acc))
+    print('dev_acc {:7.4f}, test_acc {:7.4f}'.format(dev_acc, test_acc))
     print('-' * 71)
 
 
@@ -625,7 +531,7 @@ def main(args):
     args.wandb_id = wandb_id
 
     args.hf_version = transformers.__version__
-    print(args)
+
     with wandb.init(project="KG-LM", config=args, name=args.run_name, resume="allow", id=wandb_id, settings=wandb.Settings(start_method="fork"), mode=wandb_mode):
         print(socket.gethostname())
         print ("pid:", os.getpid())
@@ -649,7 +555,6 @@ if __name__ == '__main__':
     args, _ = parser.parse_known_args()
 
     # General
-    parser.add_argument('--allow_graph', default=True, type=utils.bool_flag, help="Whether to access the information by graphs.")
     parser.add_argument('--mode', default='train', choices=['train', 'eval'], help='run training or evaluation')
     parser.add_argument('--save_dir', default=f'./saved_models/greaselm/', help='model output directory')
     parser.add_argument('--save_model', default=True, type=utils.bool_flag, help="Whether to save model checkpoints or not.")
@@ -673,8 +578,8 @@ if __name__ == '__main__':
     parser.add_argument('-k', '--k', default=5, type=int, help='The number of GreaseLM layers')
     parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads of the final graph nodes\' pooling')
     parser.add_argument('--gnn_dim', default=100, type=int, help='dimension of the GNN layers')
-    parser.add_argument('--fc_dim', default=256, type=int, help='number of FC hidden units (except for the MInt operators)')
-    parser.add_argument('--fc_layer_num', default=1, type=int, help='number of hidden layers of the final MLP')
+    parser.add_argument('--fc_dim', default=200, type=int, help='number of FC hidden units (except for the MInt operators)')
+    parser.add_argument('--fc_layer_num', default=0, type=int, help='number of hidden layers of the final MLP')
     parser.add_argument('--freeze_ent_emb', default=True, type=utils.bool_flag, nargs='?', const=True, help='Whether to freeze the entity embedding layer.')
     parser.add_argument('--ie_dim', default=200, type=int, help='number of the hidden units of the MInt operator.')
     parser.add_argument('--info_exchange', default=True, choices=[True, False, "every-other-layer"], type=utils.bool_str_flag, help="Whether we have the MInt operator in every GreaseLM layer or every other GreaseLM layer or not at all.")
@@ -696,10 +601,6 @@ if __name__ == '__main__':
     parser.add_argument('--unfreeze_epoch', default=4, type=int, help="Number of the first few epochs in which LM’s parameters are kept frozen.")
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--init_range', default=0.02, type=float, help='stddev when initializing with normal distribution')
-    parser.add_argument('--accums_times', default=32, type=int, help='times of gradient accumulation')
-    parser.add_argument('--augmentation_times', default=1, type=int, help='how many times do we want to augment the data')
 
     args = parser.parse_args()
-    print(66666)
-    print(args.train_statements)
     main(args)

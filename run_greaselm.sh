@@ -8,6 +8,7 @@ shift
 encoder='roberta-large'
 args=$@
 
+acc_times=32
 
 elr="1e-5"
 dlr="1e-3"
@@ -30,7 +31,7 @@ then
   max_epochs_before_stop=10
   ie_dim=400
 else
-  n_epochs=20
+  n_epochs=30
   max_epochs_before_stop=10
   ie_dim=400
 fi
@@ -39,6 +40,7 @@ max_seq_len=100
 ent_emb=tzw
 
 # Added for GreaseLM
+allow_graph=false
 info_exchange=false
 ie_layer_num=1
 resume_checkpoint=None
@@ -49,7 +51,7 @@ random_ent_emb=false
 echo "***** hyperparameters *****"
 echo "dataset: $dataset"
 echo "enc_name: $encoder"
-echo "batch_size: $bs mini_batch_size: $mbs"
+echo "batch_size: $bs*$acc_times mini_batch_size: $mbs"
 echo "learning_rate: elr $elr dlr $dlr"
 echo "gnn: dim $gnndim layer $k"
 echo "ie_dim: ${ie_dim}, info_exchange: ${info_exchange}"
@@ -61,10 +63,12 @@ log=logs/train_${dataset}__${run_name}.log.txt
 
 ###### Training ######
 python3 -u greaselm.py \
+    --allow_graph $allow_graph \
+    --accums_times $acc_times \
     --dataset $dataset \
     --encoder $encoder -k $k --gnn_dim $gnndim -elr $elr -dlr $dlr -bs $bs --seed $seed -mbs ${mbs} --unfreeze_epoch ${unfreeze_epoch} --encoder_layer=${encoder_layer} -sl ${max_seq_len} --max_node_num ${max_node_num} \
     --n_epochs $n_epochs --max_epochs_before_stop ${max_epochs_before_stop} \
-    --save_dir ../autodl-tmp/roberta_mlp_aug1_max \
+    --save_dir ../../autodl-tmp/back_experiment/roberta_v2\
     --run_name ${run_name} \
     --log_interval 500 \
     --ie_dim ${ie_dim} --info_exchange ${info_exchange} --ie_layer_num ${ie_layer_num} --resume_checkpoint ${resume_checkpoint} --resume_id ${resume_id} --sep_ie_layers ${sep_ie_layers} --random_ent_emb ${random_ent_emb} --ent_emb ${ent_emb//,/ } --lr_schedule ${lr_schedule} \
