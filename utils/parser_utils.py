@@ -59,7 +59,7 @@ def add_data_arguments(parser):
     args, _ = parser.parse_known_args()
     parser.set_defaults(ent_emb_paths=[EMB_PATHS.get(s) for s in args.ent_emb],
                         inhouse=(DATASET_SETTING[args.dataset] == 'inhouse'),
-                        inhouse_train_qids=args.inhouse_train_qids.format(dataset=args.dataset))
+                        inhouse_train_qids=args.inhouse_train_qids.format(data_dir=args.data_dir, dataset=args.dataset))
     data_splits = ('train', 'dev') if args.dataset in DATASET_NO_TEST else ('train', 'dev', 'test')
     for split in data_splits:
         for attribute in ('statements',):
