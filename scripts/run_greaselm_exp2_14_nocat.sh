@@ -4,6 +4,7 @@ dt=`date '+%Y%m%d_%H%M%S'`
 
 
 dataset=$1
+run_name=${0%\.*}
 shift
 encoder='roberta-large'
 args=$@
@@ -15,7 +16,7 @@ dlr="1e-3"
 bs=4
 mbs=4
 # unfreeze_epoch=3
-unfreeze_epoch=0
+unfreeze_epoch=3
 k=5 #num of gnn layers
 gnndim=200
 
@@ -50,7 +51,10 @@ resume_id=None
 sep_ie_layers=false
 random_ent_emb=false
 
+save_dir="../../autodl-tmp/$dataset/$run_name"
+
 echo "***** hyperparameters *****"
+echo "run_name: $run_name"
 echo "dataset: $dataset"
 echo "enc_name: $encoder"
 echo "batch_size: $bs*$acc_times mini_batch_size: $mbs"
@@ -59,21 +63,22 @@ echo "gnn: dim $gnndim layer $k"
 echo "ie_dim: ${ie_dim}, info_exchange: ${info_exchange}"
 echo "******************************"
 
-
-run_name=greaselm__ds_${dataset}__enc_${encoder}__k${k}__sd${seed}__iedim${ie_dim}__${dt}
 log=logs/train_${dataset}__${run_name}.log.txt
 
 ###### Training ######
-python3 -u greaselm.py \
+python3 -u ../greaselm.py \
     --accums_times $acc_times \
     --allow_graph $allow_graph \
     --allow_fuse $allow_fuse \
     --dataset $dataset \
     --encoder $encoder -k $k --gnn_dim $gnndim -elr $elr -dlr $dlr -bs $bs --seed $seed -mbs ${mbs} --unfreeze_epoch ${unfreeze_epoch} --encoder_layer=${encoder_layer} -sl ${max_seq_len} --max_node_num ${max_node_num} \
     --n_epochs $n_epochs --max_epochs_before_stop ${max_epochs_before_stop} \
-    --save_dir ../../autodl-tmp/back_experiment/five_ans \
+    --save_dir $save_dir \
     --run_name ${run_name} \
     --log_interval 500 \
+    --answer_type 1ans_5pass \
+    --last_layer_pooling_type gate_max \
+    --info_pooling_type cls \
     --ie_dim ${ie_dim} --info_exchange ${info_exchange} --ie_layer_num ${ie_layer_num} --resume_checkpoint ${resume_checkpoint} --resume_id ${resume_id} --sep_ie_layers ${sep_ie_layers} --random_ent_emb ${random_ent_emb} --ent_emb ${ent_emb//,/ } --lr_schedule ${lr_schedule} \
     $args 
 # > ${log} 2>&1 &

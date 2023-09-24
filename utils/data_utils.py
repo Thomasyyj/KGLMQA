@@ -94,8 +94,10 @@ class GreaseLM_DataLoader(object):
                  test_statement_path, test_adj_path,
                  batch_size, eval_batch_size, device, model_name, max_node_num=200, max_seq_length=128,
                  is_inhouse=False, inhouse_train_qids_path=None,
-                 subsample=1.0, n_train=-1, debug=False, cxt_node_connects_all=False, kg="cpnet"):
+                 subsample=1.0, n_train=-1, debug=False, cxt_node_connects_all=False, kg="cpnet", answer_type=None):
         super().__init__()
+        self.answer_type = answer_type
+
         self.batch_size = batch_size
         self.eval_batch_size = eval_batch_size
         self.device0, self.device1 = device
@@ -219,9 +221,9 @@ class GreaseLM_DataLoader(object):
 
         if kg == "cpnet":
             # Load cpnet
-            cpnet_vocab_path = "../../autodl-tmp/data/cpnet/concept.txt" # only used when using autodl 
+            #cpnet_vocab_path = "../../autodl-tmp/data/cpnet/concept.txt" # only used when using autodl 
 
-            # cpnet_vocab_path = "data/cpnet/concept.txt"
+            cpnet_vocab_path = "../data/cpnet/concept.txt"
             with open(cpnet_vocab_path, "r", encoding="utf8") as fin:
                 self.id2concept = [w.strip() for w in fin]
             self.concept2id = {w: i for i, w in enumerate(self.id2concept)}
@@ -253,7 +255,7 @@ class GreaseLM_DataLoader(object):
 
     def load_input_tensors(self, input_jsonl_path, max_seq_length):
         """Construct input tensors for the LM component of the model."""
-        cache_path = input_jsonl_path + "-sl{}".format(max_seq_length) + (("-" + self.model_type) if self.model_type != "roberta" else "") + '.loaded_cache'
+        cache_path = input_jsonl_path + "-sl{}".format(max_seq_length) + (("-" + self.model_type) if self.model_type != "roberta" else "" + self.answer_type + '.loaded_cache')
         use_cache = True
 
         if use_cache and not os.path.exists(cache_path):
@@ -268,7 +270,7 @@ class GreaseLM_DataLoader(object):
             elif self.model_type in ('gpt',):
                 input_tensors = load_gpt_input_tensors(input_jsonl_path, max_seq_length)
             elif self.model_type in ('bert', 'xlnet', 'roberta', 'albert'):
-                input_tensors = load_bert_xlnet_roberta_input_tensors(input_jsonl_path, max_seq_length, self.debug, self.tokenizer, self.debug_sample_size)
+                input_tensors = load_bert_xlnet_roberta_input_tensors(input_jsonl_path, max_seq_length, self.debug, self.tokenizer, self.debug_sample_size, self.answer_type)
             if not self.debug:
                 utils.save_pickle(input_tensors, cache_path)
         return input_tensors
@@ -509,7 +511,7 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
     return examples_ids, mc_labels, input_ids, mc_token_ids, lm_labels
 
 
-def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, debug, tokenizer, debug_sample_size):
+def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, debug, tokenizer, debug_sample_size, answer_type=None):
     class InputExample(object):
 
         def __init__(self, example_id, question, contexts, endings, label=None):
@@ -571,19 +573,39 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, 
                 break
             choices_features = []
             ans_all = ''
-            for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
-                # if ending_idx == 0:
-                #     ending = ending[0].upper() + ending[1:]
-                if ending_idx < nc-1:
-                    ans_all += (ending + ', ')
-                else:
-                    ans_all += ('or ' + ending + '?')
+            
+            if answer_type=='5ans_5pass':
+                for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
+                    # if ending_idx == 0:
+                    #     ending = ending[0].upper() + ending[1:]
+                    while ending[-1] in [',', '.', '?' ,'!']:
+                        ending = ending[:-1]
+                    if ending_idx < nc-1:
+                        ans_all += (ending + ', ')
+                    else:
+                        ans_all += (ending)
+            elif answer_type=='5ans_1pass':
+                for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
+                    # if ending_idx == 0:
+                    #     ending = ending[0].upper() + ending[1:]
+                    while ending[-1] in [',', '.', '?' ,'!']:
+                        ending = ending[:-1]
+                    if ending_idx < nc-1:
+                        ans_all += (ending + ' </s> ')
+                    else:
+                        ans_all += (ending)
+
 
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
                 context = context[:-1] + ', '
                 ans = example.question + " " + ending
-                encoded_input = tokenizer(context+' '+ans_all, ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
-                # encoded_input = tokenizer(context, ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
+                if answer_type=='5ans_1pass':
+                    encoded_input = tokenizer(context, ans_all, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
+                elif answer_type=='1ans_5pass':
+                    encoded_input = tokenizer(context, ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
+                else:
+                    # answer_type=='5ans_5pass'
+                    encoded_input = tokenizer(context+' '+ans_all, ans, padding="max_length", truncation=True, max_length=max_seq_length, return_token_type_ids=True, return_special_tokens_mask=True)
 
                 input_ids = encoded_input["input_ids"]
                 output_mask = encoded_input["special_tokens_mask"]

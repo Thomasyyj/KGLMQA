@@ -16,7 +16,6 @@ except:
     from transformers import get_constant_schedule, get_constant_schedule_with_warmup,  get_linear_schedule_with_warmup
 import wandb
 
-from modeling import modeling_greaselm
 from utils import data_utils as data_utils_ori
 # from utils import data_utils_kg as data_utils
 from utils import optimization_utils
@@ -44,30 +43,19 @@ def load_data(args, devices, kg):
     if torch.cuda.is_available() and args.cuda:
         torch.cuda.manual_seed(args.seed)
 
-
     #########################################################
     # Construct the dataset
     #########################################################
-    # dataset = data_utils.GreaseLM_DataLoader(args.train_statements, args.train_adj,
-    #     args.dev_statements, args.dev_adj,
-    #     args.test_statements, args.test_adj,
-    #     batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
-    #     device=devices,
-    #     model_name=args.encoder,
-    #     max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
-    #     is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-    #     subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg, augmentation_times=args.augmentation_times)
-    # print(f'-----Augmentation_times:{args.augmentation_times} --------Training_size:{dataset.train_size()}-----')
     
-    dataset = data_utils_ori.GreaseLM_DataLoader(args.data_dir + '/csqa/statement/train.statement.jsonl', args.train_adj,
-         args.data_dir+'/csqa/statement/dev.statement.jsonl', args.dev_adj,
-        args.data_dir+'/csqa/statement/test.statement.jsonl', args.test_adj,
+    dataset = data_utils_ori.GreaseLM_DataLoader(args.train_statements, args.train_adj,
+        args.dev_statements, args.dev_adj,
+        args.test_statements, args.test_adj,
         batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
         device=devices,
         model_name=args.encoder,
         max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
         is_inhouse=True, inhouse_train_qids_path=args.inhouse_train_qids,
-        subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg)
+        subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg, answer_type=args.answer_type)
     
     return dataset
 
@@ -142,7 +130,7 @@ def count_parameters(loaded_params, not_loaded_params):
     print('num_loaded_params:', num_loaded_params)
     print('num_total_params:', num_params + num_fixed_params + num_loaded_params)
 
-def calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func):
+def calc_loss_and_acc(logits, labels, loss_type, loss_func, sent_vecs=None):
     bs = labels.size(0)
     # labels: bs, 
     # sent_vecs, bs, nc, sent_dim
@@ -159,17 +147,19 @@ def calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func):
     loss *= bs
 
     n_corrects = (logits.argmax(1) == labels).sum().item()
-
-    similarity_matrix = F.cosine_similarity(sent_vecs.unsqueeze(2), sent_vecs.unsqueeze(1), dim=3) # bs, nc, nc
-    contrast_loss_matrix = torch.clamp(similarity_matrix, min=0)
-    # Remove diagonal elements
-    bs_input, nc_input, _ = sent_vecs.size()
-    tmp_mask = ~torch.eye(nc_input, dtype=torch.bool, device=sent_vecs.device)
-    contrast_loss = contrast_loss_matrix.masked_select(tmp_mask.unsqueeze(0)).view(bs_input, nc_input, nc_input - 1).contiguous()
-    contrast_loss = torch.mean(contrast_loss, dim=-1) # bs, nc
-    contrast_loss = contrast_loss[torch.arange(bs_input), labels]
-
-    return loss, n_corrects, torch.mean(contrast_loss)
+    
+    if sent_vecs is not None:
+        similarity_matrix = F.cosine_similarity(sent_vecs.unsqueeze(2), sent_vecs.unsqueeze(1), dim=3) # bs, nc, nc
+        contrast_loss_matrix = torch.clamp(similarity_matrix, min=0)
+        # Remove diagonal elements
+        bs_input, nc_input, _ = sent_vecs.size()
+        tmp_mask = ~torch.eye(nc_input, dtype=torch.bool, device=sent_vecs.device)
+        contrast_loss = contrast_loss_matrix.masked_select(tmp_mask.unsqueeze(0)).view(bs_input, nc_input, nc_input - 1).contiguous()
+        contrast_loss = torch.mean(contrast_loss, dim=-1) # bs, nc
+        contrast_loss = contrast_loss[torch.arange(bs_input), labels]
+        return loss, n_corrects, torch.mean(contrast_loss)
+    
+    return loss, n_corrects, None
 
 
 def calc_eval_accuracy_test(eval_set, model, loss_type, loss_func, debug, save_test_preds, preds_path):
@@ -194,7 +184,7 @@ def calc_eval_accuracy_test(eval_set, model, loss_type, loss_func, debug, save_t
             logits = logits[:,:5]
             # bs, 5
             labels = labels[:,:5]
-            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func)
+            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, labels, loss_type, loss_func)
 
             total_loss_acm += loss.item()
             n_corrects_acm += n_corrects
@@ -231,7 +221,7 @@ def calc_eval_accuracy(eval_set, model, loss_type, loss_func, debug, save_test_p
             ####
             logits, _, sent_vecs = model(*input_data)
 
-            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels, loss_type, loss_func)
+            loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, labels, loss_type, loss_func)
 
             total_loss_acm += loss.item()
             n_corrects_acm += n_corrects
@@ -412,8 +402,9 @@ def train(args, resume, has_test_split, devices, kg):
                 logits, _, sent_vecs = model(*[x[a:b] for x in input_data])
                 # logits: [bs, nc]
 
-                loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, sent_vecs, labels[a:b], args.loss, loss_func)
-                total_contrast_loss_acm += contrast_loss*bs
+                loss, n_corrects, contrast_loss = calc_loss_and_acc(logits, labels[a:b], args.loss, loss_func)
+                if contrast_loss:
+                    total_contrast_loss_acm += contrast_loss*bs
                 total_loss_acm += loss.item()
                 loss = loss / bs             
                 loss = loss / accum_steps
@@ -490,13 +481,13 @@ def train(args, resume, has_test_split, devices, kg):
                     wandb.log({"test_acc": test_acc, "test_loss": test_total_loss, "final_test_acc": final_test_acc}, step=global_step)
 
         # Save the model checkpoint
-        if args.save_model and epoch_id>=0 and save_:
+        if args.save_model and epoch_id>=20 and save_:
             save_ = 0
             model_state_dict = model.state_dict()
             del model_state_dict["lmgnn.concept_emb.emb.weight"]
             checkpoint = {"model": model_state_dict, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "epoch": epoch_id, "global_step": global_step, "best_dev_epoch": best_dev_epoch, "best_dev_acc": best_dev_acc, "final_test_acc": final_test_acc, "config": args}
             print('Saving model to {}.{}'.format(model_path, epoch_id))
-            torch.save(checkpoint, model_path +".{}".format(epoch_id))
+            torch.save(checkpoint, model_path +".{}".format(999))
         model.train()
         start_time = time.time()
         if epoch_id > args.unfreeze_epoch and epoch_id - best_dev_epoch >= args.max_epochs_before_stop:
@@ -650,6 +641,9 @@ if __name__ == '__main__':
 
     # General
     parser.add_argument('--allow_graph', default=True, type=utils.bool_flag, help="Whether to access the information by graphs.")
+    parser.add_argument('--allow_fuse', default=True, type=utils.bool_flag, help="Whether to access the information by graphs.")
+    parser.add_argument('--answer_type', default='5ans_5pass', type=str, choices=['1ans_5pass', '5ans_1pass', '5ans_5pass'], help="The type of input for the models")
+    parser.add_argument('--kil', default=True, type=utils.bool_flag, help="Whether to access the information by graphs.")
     parser.add_argument('--mode', default='train', choices=['train', 'eval'], help='run training or evaluation')
     parser.add_argument('--save_dir', default=f'./saved_models/greaselm/', help='model output directory')
     parser.add_argument('--save_model', default=True, type=utils.bool_flag, help="Whether to save model checkpoints or not.")
@@ -673,7 +667,7 @@ if __name__ == '__main__':
     parser.add_argument('-k', '--k', default=5, type=int, help='The number of GreaseLM layers')
     parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads of the final graph nodes\' pooling')
     parser.add_argument('--gnn_dim', default=100, type=int, help='dimension of the GNN layers')
-    parser.add_argument('--fc_dim', default=256, type=int, help='number of FC hidden units (except for the MInt operators)')
+    parser.add_argument('--fc_dim', default=400, type=int, help='number of FC hidden units (except for the MInt operators)')
     parser.add_argument('--fc_layer_num', default=1, type=int, help='number of hidden layers of the final MLP')
     parser.add_argument('--freeze_ent_emb', default=True, type=utils.bool_flag, nargs='?', const=True, help='Whether to freeze the entity embedding layer.')
     parser.add_argument('--ie_dim', default=200, type=int, help='number of the hidden units of the MInt operator.')
@@ -699,7 +693,18 @@ if __name__ == '__main__':
     parser.add_argument('--accums_times', default=32, type=int, help='times of gradient accumulation')
     parser.add_argument('--augmentation_times', default=1, type=int, help='how many times do we want to augment the data')
 
+    parser.add_argument('--info_pooling_type', default='cls', choices=['cls', 'max', 'mean', 'attn'], help='the pooling method used')
+    parser.add_argument('--last_layer_pooling_type', default='cls', choices=['cls', 'max', 'mean', 'attn', 'layer_wise_cls', 'layer_wise_max', 'layer_wise_mean', 'layer_wise_attn', 'cat_max', 'cat_mean',"cat_gate_max","cat_gate_mean","gate_mean","gate_max","ans_max","ans_mean"], help='the pooling method used in the last layer')
+
     args = parser.parse_args()
-    print(66666)
     print(args.train_statements)
+
+    if args.answer_type == '1ans_5pass':
+        from modeling import modeling_greaselm_1ans_5pass as modeling_greaselm
+    elif args.answer_type == '5ans_1pass':
+        from modeling import modeling_greaselm_5ans_1pass as modeling_greaselm
+    else:
+        # args.answer_type == '5ans_5pass':
+        from modeling import modeling_greaselm_5ans_5pass as modeling_greaselm
+
     main(args)
