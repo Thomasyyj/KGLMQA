@@ -1,4 +1,4 @@
-name: base
+name: kglmqa
 channels:
   - https://mirrors.ustc.edu.cn/anaconda/pkgs/main/
   - https://mirrors.ustc.edu.cn/anaconda/pkgs/free/
